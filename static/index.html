@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>同人志书库</title>
+  <link rel="stylesheet" href="/assets/style.css">
+  <script defer src="/assets/app.js"></script>
+</head>
+<body>
+  <main id="library" class="shell">
+    <header class="masthead">
+      <h1>同人志书库</h1>
+      <div class="masthead-actions">
+        <p id="summary" role="status"></p>
+        <button id="settings-open" type="button">设置</button>
+      </div>
+    </header>
+    <div class="layout">
+      <aside aria-label="标签筛选">
+        <div class="section-title"><h2>标签索引</h2><button id="clear" hidden>清除</button></div>
+        <div id="facets"></div>
+      </aside>
+      <section aria-labelledby="results-title" class="results">
+        <div class="section-title">
+          <h2 id="results-title">全部同人志</h2>
+          <div class="view-options">
+            <span id="count"></span>
+            <button id="list-view" type="button" aria-pressed="true">列表</button>
+            <button id="cover-view" type="button" aria-pressed="false">封面</button>
+          </div>
+        </div>
+        <div id="books"></div>
+      </section>
+    </div>
+  </main>
+  <section id="reader" hidden aria-label="阅读器">
+    <header class="toolbar">
+      <a id="back" href="#">返回书库</a>
+      <h1 id="reading-title"></h1>
+      <label for="speed">速度 <output id="speed-value">90</output> px/s</label>
+      <input id="speed" type="range" min="10" max="600" step="5" value="90">
+      <button id="scroll-toggle" disabled aria-pressed="false">自动滚动</button>
+    </header>
+    <main id="pages" tabindex="0" aria-label="书籍页面"></main>
+  </section>
+  <dialog id="settings" aria-labelledby="settings-title">
+    <div class="section-title">
+      <h2 id="settings-title">书库设置</h2>
+      <button id="settings-close" type="button">关闭</button>
+    </div>
+    <form id="settings-auth" hidden>
+      <label for="admin-token">管理员令牌</label>
+      <input id="admin-token" type="password" autocomplete="off">
+      <button type="submit">解锁设置</button>
+    </form>
+    <form id="settings-form" hidden>
+      <label for="pdf-dir">PDF 文件夹路径</label>
+      <input id="pdf-dir" type="text">
+      <label for="images-dir">图片文件夹路径</label>
+      <input id="images-dir" type="text">
+      <label for="jm-username">JM 账号</label>
+      <input id="jm-username" type="text" autocomplete="off">
+      <label for="jm-password">JM 密码</label>
+      <input id="jm-password" type="password" autocomplete="new-password">
+      <div class="settings-actions">
+        <button type="submit" value="save">保存并扫描</button>
+        <button type="submit" value="refresh">保存并刷新全部标签</button>
+      </div>
+    </form>
+    <p id="settings-status" class="status" role="status"></p>
+  </dialog>
+</body>
+</html>

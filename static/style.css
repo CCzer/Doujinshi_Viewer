@@ -1,0 +1,108 @@
+:root {
+  color-scheme: dark;
+  font: 16px/1.55 system-ui, "Microsoft YaHei", sans-serif;
+  --background: #101318;
+  --surface: #181d25;
+  --line: #303845;
+  --muted: #adb8c8;
+  --accent: #8ee8cc;
+  color: #edf1f7;
+  background: var(--background);
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; }
+button, a { font: inherit; }
+button, .toolbar a {
+  padding: .35rem .7rem;
+  border: 1px solid var(--line);
+  border-radius: .4rem;
+  background: var(--surface);
+  color: inherit;
+  cursor: pointer;
+  text-decoration: none;
+}
+button:hover, .toolbar a:hover { border-color: var(--accent); }
+button:disabled { opacity: .5; cursor: default; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+h1, h2, h3, p { margin: 0; }
+.shell { max-width: 1320px; margin: auto; padding: 0 clamp(1rem, 5vw, 4rem) 3rem; }
+.masthead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: .7rem 1.2rem;
+  flex-wrap: wrap;
+  padding: 2.6rem 0 1.7rem;
+  border-bottom: 1px solid var(--line);
+}
+.masthead h1 { font-size: clamp(1.8rem, 4vw, 2.55rem); letter-spacing: .04em; }
+.layout { display: grid; grid-template-columns: minmax(210px, 1fr) minmax(0, 2.8fr); gap: 2rem; padding-top: 1.6rem; }
+.section-title { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; margin-bottom: 1rem; }
+h2 { font-size: 1.1rem; }
+h3 { font-size: .9rem; color: var(--muted); margin-bottom: .55rem; }
+.facet { margin-bottom: 1.05rem; }
+.chips { display: flex; flex-wrap: wrap; gap: .4rem; }
+.chips button { font-size: .875rem; max-width: 100%; overflow-wrap: anywhere; }
+button[aria-pressed="true"] { background: var(--accent); color: #14221f; border-color: var(--accent); }
+#summary, #count, .status, .empty { color: var(--muted); }
+.status, #count { font-size: .9rem; }
+.book { background: var(--surface); border: 1px solid var(--line); border-radius: .65rem; margin-bottom: .7rem; padding: 1rem; }
+.book a { display: block; color: inherit; font-weight: 650; overflow-wrap: anywhere; text-decoration: none; }
+.book a:hover { color: var(--accent); text-decoration: underline; }
+.book .chips { margin-top: .65rem; }
+#reader { height: 100dvh; display: flex; flex-direction: column; }
+.toolbar { display: flex; align-items: center; gap: .6rem .9rem; flex-wrap: wrap; padding: .7rem 1rem; background: var(--surface); border-bottom: 1px solid var(--line); }
+.toolbar h1 { flex: 1 1 240px; font-size: .95rem; overflow-wrap: anywhere; }
+.toolbar label { color: var(--muted); font-size: .875rem; }
+.toolbar input { width: 8rem; accent-color: var(--accent); }
+#pages { flex: 1; overflow: auto; overscroll-behavior: contain; background: #080a0d; }
+#pages img { display: block; width: min(100%, 1000px); height: auto; margin: 0 auto .25rem; background: var(--surface); }
+#pages p { margin: 1rem; text-align: center; }
+@media (max-width: 700px) {
+  .layout { grid-template-columns: 1fr; gap: 1rem; }
+  .masthead { padding-top: 1.4rem; }
+  aside { border-bottom: 1px solid var(--line); padding-bottom: .75rem; }
+}
+.masthead-actions, .view-options, .settings-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: .5rem;
+}
+.cover-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 175px), 1fr));
+  gap: .85rem;
+}
+.cover-grid .book { margin: 0; min-width: 0; }
+.cover-grid .empty { grid-column: 1 / -1; }
+.cover-image {
+  width: 100%;
+  aspect-ratio: 3 / 4;
+  display: block;
+  object-fit: contain;
+  background: var(--background);
+  border-radius: .35rem;
+  margin-bottom: .65rem;
+}
+dialog {
+  color: inherit;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: .7rem;
+  padding: 1.2rem;
+  width: min(100% - 2rem, 540px);
+}
+dialog::backdrop { background: rgb(0 0 0 / .68); }
+dialog form { display: grid; gap: .5rem; }
+dialog form input {
+  font: inherit;
+  border-radius: .4rem;
+  border: 1px solid var(--line);
+  color: inherit;
+  background: var(--background);
+  padding: .35rem .6rem;
+  width: 100%;
+}
+.settings-actions, #settings-status { margin-top: .7rem; }

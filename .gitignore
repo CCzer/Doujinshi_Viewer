@@ -1,0 +1,14 @@
+# Track only the public project sources.
+/*
+!/.gitignore
+!/README.md
+!/requirements.txt
+!/config.example.json
+!/settings.py
+!/library.py
+!/viewer.py
+!/static/
+/static/*
+!/static/index.html
+!/static/app.js
+!/static/style.css

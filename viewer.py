@@ -1,0 +1,260 @@
+import argparse
+import hmac
+import ipaddress
+import io
+import logging
+import os
+import re
+import shutil
+import subprocess
+from functools import lru_cache
+from pathlib import Path
+from threading import Lock, Thread
+
+from PIL import Image, ImageOps
+
+from flask import Flask, abort, jsonify, request, send_file
+
+from library import IMAGE_TYPES, connect, image_pages, index_pending, make_client, scan
+from settings import load_config, roots, save_config, validate
+
+BASE = Path(__file__).resolve().parent
+PAGE_SIZE = re.compile(r"^Page\s+(\d+) size:\s+([\d.]+) x ([\d.]+)", re.M)
+PAGE_ROT = re.compile(r"^Page\s+(\d+) rot:\s+(\d+)", re.M)
+
+
+def poppler(*command):
+    return subprocess.run(command, check=True, capture_output=True, timeout=30,
+                          env={**os.environ, "LC_ALL": "C"}).stdout
+
+
+@lru_cache(maxsize=128)
+def page_sizes(path, mtime, size):
+    info = poppler("pdfinfo", "-f", "1", "-l", "2147483647", str(path)).decode(errors="replace")
+    rotations = dict(PAGE_ROT.findall(info))
+    sizes = []
+    for page, width, height in PAGE_SIZE.findall(info):
+        dimensions = [float(width), float(height)]
+        if int(rotations.get(page, 0)) % 180:
+            dimensions.reverse()
+        sizes.append(dimensions)
+    return sizes
+
+
+@lru_cache(maxsize=128)
+def cached_image_pages(folder, signature):
+    return image_pages(folder)
+
+
+@lru_cache(maxsize=1024)
+def image_dimensions(path, mtime, size):
+    with Image.open(path) as image:
+        width, height = image.size
+        if image.getexif().get(274) in (5, 6, 7, 8):
+            return [height, width]
+        return [width, height]
+
+
+def create_app(config_path, database, no_jm=False, base=BASE):
+    app = Flask(__name__, static_folder=str(BASE / "static"), static_url_path="/assets")
+    app.config["MAX_CONTENT_LENGTH"] = 32_768
+    lock = Lock()
+    config = load_config(config_path, base)
+    sources = roots(config, base)
+    index_thread = None
+
+    def start_index(refresh=False):
+        nonlocal index_thread
+        if no_jm or not sources:
+            return
+        credentials = (config["jm_username"], config["jm_password"])
+        index_thread = Thread(
+            target=index_pending, args=(sources, database, lambda: make_client(credentials)),
+            kwargs={"refresh": refresh}, daemon=True,
+        )
+        index_thread.start()
+
+    database.parent.mkdir(parents=True, exist_ok=True)
+    scan(sources, database)
+    start_index()
+
+    def check_admin():
+        try:
+            local = ipaddress.ip_address(request.remote_addr).is_loopback
+        except ValueError:
+            local = False
+        host = request.host.rsplit(":", 1)[0] if request.host.count(":") == 1 else request.host
+        if local and (host in {"localhost", "127.0.0.1", "[::1]"} or host.startswith("[::1]:")):
+            return
+        token = config["admin_token"]
+        supplied = request.headers.get("X-Admin-Token", "")
+        if not token or not hmac.compare_digest(token.encode(), supplied.encode()):
+            abort(403)
+
+    @app.route("/api/settings", methods=["GET", "POST"])
+    def settings():
+        nonlocal config, sources
+        with lock:
+            check_admin()
+            if request.method == "POST":
+                if not request.is_json:
+                    return jsonify(error="请提交 JSON 配置"), 400
+                if index_thread and index_thread.is_alive():
+                    return jsonify(error="标签更新正在进行，请稍后再试"), 409
+                values = request.get_json()
+                if not isinstance(values, dict):
+                    return jsonify(error="配置格式无效"), 400
+                updated = {**config, **values}
+                if values.get("clear_password") is True:
+                    updated["jm_password"] = ""
+                elif values.get("jm_username") == "" and not values.get("jm_password"):
+                    updated["jm_password"] = ""
+                elif not values.get("jm_password"):
+                    updated["jm_password"] = config["jm_password"]
+                try:
+                    updated = validate(updated, base)
+                    updated_sources = roots(updated, base)
+                    scan(updated_sources, database)
+                    save_config(config_path, updated)
+                except (ValueError, OSError) as error:
+                    return jsonify(error=str(error)), 400
+                config, sources = updated, updated_sources
+                start_index(refresh=values.get("refresh") is True)
+
+            response = jsonify(
+                pdf_dir=config["pdf_dir"], images_dir=config["images_dir"],
+                jm_username=config["jm_username"], has_password=bool(config["jm_password"]),
+            )
+            response.headers["Cache-Control"] = "no-store"
+            return response
+
+    def book_path(book_id):
+        with lock:
+            current = sources
+        with connect(database) as conn:
+            book = conn.execute("SELECT * FROM books WHERE id = ?", (book_id,)).fetchone()
+        if book is None or book["source"] not in current:
+            abort(404)
+        root = current[book["source"]]
+        candidate = root / book["path"]
+        path = candidate.resolve()
+        is_images = book["source"].startswith("images:")
+        if candidate.is_symlink() or not path.is_relative_to(root):
+            abort(404)
+        if not (path.is_dir() if is_images else path.is_file()):
+            abort(404)
+        return path, is_images, book["mtime"]
+
+    @app.get("/")
+    def home():
+        return app.send_static_file("index.html")
+
+    @app.get("/api/library")
+    def library():
+        with lock:
+            current = tuple(sources)
+            indexing = index_thread is not None and index_thread.is_alive()
+        books = {}
+        if current:
+            placeholders = ",".join("?" for _ in current)
+            with connect(database) as conn:
+                rows = conn.execute(f"""
+                    SELECT b.id, b.path, b.status, t.kind, t.name
+                    FROM books b LEFT JOIN book_tags t ON b.id = t.book_id
+                    WHERE b.source IN ({placeholders})
+                    ORDER BY b.path, t.kind, t.name
+                """, current).fetchall()
+            for row in rows:
+                book = books.setdefault(row["id"], {
+                    "id": row["id"], "name": Path(row["path"]).name,
+                    "status": row["status"], "tags": [],
+                })
+                if row["kind"]:
+                    book["tags"].append({"kind": row["kind"], "name": row["name"]})
+        response = jsonify(list(books.values()))
+        response.headers["X-Indexing"] = "1" if indexing else "0"
+        return response
+
+    @app.get("/api/books/<int:book_id>/pages")
+    def pages(book_id):
+        path, is_images, signature = book_path(book_id)
+        try:
+            if is_images:
+                dimensions = []
+                for image in cached_image_pages(path, signature):
+                    if image.is_symlink() or not image.resolve().is_relative_to(path):
+                        dimensions.append([1, 1])
+                        continue
+                    try:
+                        stat = image.stat()
+                        dimensions.append(image_dimensions(image, stat.st_mtime_ns, stat.st_size))
+                    except (OSError, Image.DecompressionBombError):
+                        dimensions.append([1, 1])
+            else:
+                stat = path.stat()
+                dimensions = page_sizes(path, stat.st_mtime_ns, stat.st_size)
+        except (OSError, subprocess.SubprocessError):
+            abort(422)
+        if not dimensions:
+            abort(422)
+        return jsonify(dimensions)
+
+    @app.get("/api/books/<int:book_id>/cover")
+    def cover_image(book_id):
+        return page_image(book_id, 1, cover=True)
+
+    @app.get("/api/books/<int:book_id>/pages/<int:page>")
+    def page_image(book_id, page, cover=False):
+        path, is_images, signature = book_path(book_id)
+        try:
+            if is_images:
+                entries = cached_image_pages(path, signature)
+                if not 1 <= page <= len(entries):
+                    abort(404)
+                entry = entries[page - 1]
+                image = entry.resolve()
+                if entry.is_symlink() or not image.is_relative_to(path) or not image.is_file():
+                    abort(404)
+                if not cover:
+                    return send_file(image, mimetype=IMAGE_TYPES[entry.suffix.lower()])
+                with Image.open(image) as original:
+                    thumbnail = ImageOps.exif_transpose(original).convert("RGB")
+                    thumbnail.thumbnail((420, 420))
+                    output = io.BytesIO()
+                    thumbnail.save(output, "JPEG", quality=85)
+                    output.seek(0)
+                    return send_file(output, mimetype="image/jpeg", max_age=86400)
+
+            stat = path.stat()
+            if not 1 <= page <= len(page_sizes(path, stat.st_mtime_ns, stat.st_size)):
+                abort(404)
+            image = poppler("pdftoppm", "-f", str(page), "-l", str(page), "-scale-to",
+                            "420" if cover else "1800", "-singlefile", "-jpeg", str(path))
+        except (OSError, subprocess.SubprocessError, Image.DecompressionBombError):
+            abort(422)
+        return send_file(io.BytesIO(image), mimetype="image/jpeg", max_age=86400)
+
+    return app
+
+
+def main():
+    parser = argparse.ArgumentParser(description="内网同人志阅读器")
+    parser.add_argument("--config", type=Path, default=BASE / "data" / "config.json")
+    parser.add_argument("--db", type=Path, default=BASE / "data" / "library.sqlite3")
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--no-jm", action="store_true", help="跳过联网打标签")
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    if any(not shutil.which(command) for command in ("pdfinfo", "pdftoppm")):
+        logging.warning("缺少 Poppler，PDF 暂无法阅读；图片阅读仍可用")
+    try:
+        app = create_app(args.config.resolve(), args.db.resolve(), args.no_jm)
+    except (ValueError, OSError) as error:
+        parser.error(str(error))
+    app.run(host=args.host, port=args.port, threaded=True)
+
+
+if __name__ == "__main__":
+    main()
