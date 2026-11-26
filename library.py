@@ -93,8 +93,9 @@ def discover(source, root):
                     size += stat.st_size
                 files[folder.name] = (int.from_bytes(digest.digest()[:7], "big"), size)
     else:
+        extension = ".zip" if source.startswith("zips:") else ".pdf"
         for path in root.rglob("*"):
-            if path.suffix.lower() != ".pdf" or path.is_symlink() or not path.is_file():
+            if path.suffix.lower() != extension or path.is_symlink() or not path.is_file():
                 continue
             if not path.resolve().is_relative_to(root):
                 continue
@@ -108,6 +109,7 @@ def scan(sources, database):
     with connect(database) as conn:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript("""
+            BEGIN;
             CREATE TABLE IF NOT EXISTS books (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 source TEXT NOT NULL,
@@ -125,16 +127,62 @@ def scan(sources, database):
                 PRIMARY KEY (book_id, kind, name)
             );
             CREATE INDEX IF NOT EXISTS tags_lookup ON book_tags(kind, name, book_id);
+            CREATE TABLE IF NOT EXISTS tag_overrides (
+                book_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+                kind TEXT NOT NULL,
+                name TEXT NOT NULL,
+                present INTEGER NOT NULL,
+                PRIMARY KEY (book_id, kind, name)
+            );
+            CREATE VIEW IF NOT EXISTS manually_classified_books AS
+                SELECT b.id AS book_id
+                FROM books b
+                JOIN book_tags fallback ON fallback.book_id = b.id
+                   AND fallback.kind = 'tags' AND fallback.name = '未分类'
+                WHERE b.status != 'indexed'
+                  AND EXISTS (
+                      SELECT 1 FROM tag_overrides o
+                      WHERE o.book_id = b.id AND o.present = 1
+                        AND NOT (o.kind = 'tags' AND o.name = '未分类')
+                  );
+            DROP VIEW IF EXISTS effective_book_tags;
+            CREATE VIEW effective_book_tags AS
+                SELECT t.book_id, t.kind, t.name
+                FROM book_tags t
+                LEFT JOIN tag_overrides o USING (book_id, kind, name)
+                WHERE o.present IS NULL
+                  AND NOT (
+                      t.kind = 'tags' AND t.name = '未分类'
+                      AND EXISTS (SELECT 1 FROM manually_classified_books m WHERE m.book_id = t.book_id)
+                  )
+                UNION ALL
+                SELECT book_id, kind, name FROM tag_overrides WHERE present = 1;
+            COMMIT;
         """)
         for source, files in discovered.items():
             existing = conn.execute("SELECT * FROM books WHERE source = ?", (source,))
             for row in existing.fetchall():
-                if files.get(row["path"]) != (row["mtime"], row["size"]):
-                    conn.execute("DELETE FROM books WHERE id = ?", (row["id"],))
+                signature = files.get(row["path"])
+                if signature == (row["mtime"], row["size"]):
+                    continue
+                overrides = conn.execute("""
+                    SELECT kind, name, present FROM tag_overrides WHERE book_id = ?
+                """, (row["id"],)).fetchall() if signature is not None else []
+                conn.execute("DELETE FROM books WHERE id = ?", (row["id"],))
+                if overrides:
+                    book_id = conn.execute("""
+                        INSERT INTO books(source, path, mtime, size) VALUES (?, ?, ?, ?)
+                    """, (source, row["path"], *signature)).lastrowid
+                    conn.executemany("INSERT INTO tag_overrides VALUES (?, ?, ?, ?)",
+                                     ((book_id, *entry) for entry in overrides))
             conn.executemany("""
                 INSERT INTO books(source, path, mtime, size) VALUES (?, ?, ?, ?)
                 ON CONFLICT(source, path) DO NOTHING
             """, ((source, path, *signature) for path, signature in files.items()))
+            conn.execute("""
+                INSERT OR IGNORE INTO book_tags(book_id, kind, name)
+                SELECT id, 'tags', '未分类' FROM books WHERE source = ? AND status = 'unmatched'
+            """, (source,))
 
 
 def make_client(credentials):
@@ -151,12 +199,10 @@ def make_client(credentials):
 
 
 def find_album(client, candidates):
-    ambiguous = False
     for title in candidates:
         key = title_key(title)
         if not key:
             continue
-        matches = {}
         for number in range(1, 4):
             page = client.search_site(search_query=title, page=number)
             if page.is_single_album:
@@ -166,13 +212,10 @@ def find_album(client, candidates):
                 break
             for album_id, result_title in page:
                 if key in {title_key(part) for part in titles(result_title)}:
-                    matches[str(album_id)] = result_title
-            if len(matches) > 1 or number >= page.page_count:
+                    return client.get_album_detail(str(album_id)), "indexed"
+            if number >= page.page_count:
                 break
-        if len(matches) == 1:
-            return client.get_album_detail(next(iter(matches))), "indexed"
-        ambiguous |= len(matches) > 1
-    return None, "ambiguous" if ambiguous else "unmatched"
+    return None, "unmatched"
 
 
 def index_pending(sources, database, client_factory, refresh=False):
@@ -218,8 +261,12 @@ def index_pending(sources, database, client_factory, refresh=False):
             LOG.warning("刷新未获得新标签，保留已有标签 %s", book["path"])
             continue
 
+        if status == "unmatched":
+            tags.append((book["id"], "tags", "未分类"))
+
         with connect(database) as conn:
-            conn.execute("DELETE FROM book_tags WHERE book_id = ?", (book["id"],))
+            if status != "error":
+                conn.execute("DELETE FROM book_tags WHERE book_id = ?", (book["id"],))
             conn.executemany("INSERT OR IGNORE INTO book_tags VALUES (?, ?, ?)", tags)
             conn.execute("UPDATE books SET status = ?, album = ? WHERE id = ?",
                          (status, album.album_id if album else None, book["id"]))

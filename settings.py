@@ -3,7 +3,8 @@ import os
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
-FIELDS = ("pdf_dir", "images_dir", "jm_username", "jm_password", "admin_token")
+DEFAULT_PATHS = {"pdf_dir": "books/pdf", "images_dir": "books/images", "zip_dir": "books/zip"}
+FIELDS = ("pdf_dir", "images_dir", "zip_dir", "jm_username", "jm_password", "admin_password_hash")
 
 
 def validate(values, base):
@@ -12,7 +13,7 @@ def validate(values, base):
     config = {key: values.get(key, "") for key in FIELDS}
     if any(not isinstance(value, str) for value in config.values()):
         raise ValueError("配置字段必须为字符串")
-    for field in ("pdf_dir", "images_dir"):
+    for field in ("pdf_dir", "images_dir", "zip_dir"):
         config[field] = config[field].strip()
         if config[field] and not (base / Path(config[field]).expanduser()).is_dir():
             raise ValueError("配置的文件夹不存在：" + field)
@@ -25,8 +26,11 @@ def validate(values, base):
 def load_config(path, base):
     if path.exists():
         return validate(json.loads(path.read_text(encoding="utf-8")), base)
-    samples = {"pdf_dir": "pdf_test", "images_dir": "images_test"}
-    return validate({key: value for key, value in samples.items() if (base / value).is_dir()}, base)
+    return validate(default_paths(base), base)
+
+
+def default_paths(base):
+    return {key: value for key, value in DEFAULT_PATHS.items() if (base / value).is_dir()}
 
 
 def save_config(path, config):
@@ -44,9 +48,10 @@ def save_config(path, config):
 
 
 def roots(config, base):
+    prefixes = {"pdf_dir": "", "images_dir": "images:", "zip_dir": "zips:"}
     return {
-        ("images:" if field == "images_dir" else "") + str(root): root
-        for field in ("pdf_dir", "images_dir")
+        prefix + str(root): root
+        for field, prefix in prefixes.items()
         if config[field]
         for root in [(base / Path(config[field]).expanduser()).resolve()]
     }

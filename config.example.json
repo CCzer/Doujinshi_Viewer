@@ -1,7 +1,7 @@
 {
-  "pdf_dir": "",
-  "images_dir": "",
+  "pdf_dir": "books/pdf",
+  "images_dir": "books/images",
+  "zip_dir": "books/zip",
   "jm_username": "",
-  "jm_password": "",
-  "admin_token": ""
+  "jm_password": ""
 }

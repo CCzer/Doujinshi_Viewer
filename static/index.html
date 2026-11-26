@@ -8,7 +8,71 @@
   <script defer src="/assets/app.js"></script>
 </head>
 <body>
-  <main id="library" class="shell">
+  <main id="setup" class="setup" hidden>
+    <h1>首次配置</h1>
+    <p id="setup-step" class="status"></p>
+    <form id="setup-form">
+      <section class="setup-panel">
+        <h2>管理员密码</h2>
+        <p>重启后，任何设备修改书库设置都需要输入此密码。</p>
+        <label for="setup-admin">管理员密码</label>
+        <input id="setup-admin" type="password" autocomplete="new-password" required>
+        <label for="setup-confirm">确认管理员密码</label>
+        <input id="setup-confirm" type="password" autocomplete="new-password" required>
+      </section>
+      <section class="setup-panel" hidden>
+        <h2>JM 账号</h2>
+        <p>用于为书籍搜索标签。两项都留空时会尝试匿名搜索。注意：匿名搜索会导致多数本子无法分类标签</p>
+        <label for="setup-jm-username">JM 账号</label>
+        <input id="setup-jm-username" type="text" autocomplete="off">
+        <label for="setup-jm-password">JM 密码</label>
+        <input id="setup-jm-password" type="password" autocomplete="new-password">
+      </section>
+      <section class="setup-panel" hidden>
+        <h2>PDF 文件夹</h2>
+        <label for="setup-pdf-dir">主机上的 PDF 路径，可留空</label>
+        <input id="setup-pdf-dir" type="text" placeholder="books/pdf">
+        <p>路径示例 <code>/srv/书库/PDF</code> 或 <code>books/pdf</code></p>
+        <pre>PDF/
+├── 标题一.pdf
+└── 合集/
+    └── 标题二.pdf</pre>
+      </section>
+      <section class="setup-panel" hidden>
+        <h2>图片文件夹</h2>
+        <label for="setup-images-dir">主机上的图片路径，可留空</label>
+        <input id="setup-images-dir" type="text" placeholder="books/images">
+        <p>路径示例 <code>/srv/书库/图片</code> 或 <code>books/images</code></p>
+        <pre>图片/
+├── 标题一/
+│   ├── 1.webp
+│   └── 2.jpg
+└── 标题二/
+    └── 第1话/
+        └── 1.png</pre>
+      </section>
+      <section class="setup-panel" hidden>
+        <h2>ZIP 文件夹</h2>
+        <label for="setup-zip-dir">主机上的 ZIP 路径，可留空</label>
+        <input id="setup-zip-dir" type="text" placeholder="books/zip">
+        <p>路径示例 <code>/srv/书库/ZIP</code> 或 <code>books/zip</code></p>
+        <pre>ZIP/
+├── 标题一.zip
+└── 合集/
+    └── 标题二.zip</pre>
+      </section>
+      <p id="setup-error" class="status" role="alert"></p>
+      <div class="settings-actions">
+        <button id="setup-back" type="button" hidden>上一步</button>
+        <button id="setup-next" type="submit">下一步</button>
+      </div>
+    </form>
+    <section id="setup-complete" hidden>
+      <h2>配置已保存</h2>
+      <p>请在主机上停止 Viewer，重新运行原来的启动命令，再刷新此页。</p>
+    </section>
+  </main>
+  <main id="library" class="shell" hidden>
     <header class="masthead">
       <h1>同人志书库</h1>
       <div class="masthead-actions">
@@ -31,12 +95,21 @@
           </div>
         </div>
         <div id="books"></div>
+        <nav id="pagination" class="pagination" aria-label="书库分页" hidden>
+          <button id="previous-page" type="button">上一页</button>
+          <span id="page-number" role="status"></span>
+          <button id="next-page" type="button">下一页</button>
+        </nav>
       </section>
     </div>
   </main>
   <section id="reader" hidden aria-label="阅读器">
     <header class="toolbar">
       <a id="back" href="#">返回书库</a>
+      <div class="size-control">
+        <label for="page-size">页面大小 <output id="page-size-value" for="page-size">100%</output></label>
+        <input id="page-size" type="range" min="40" max="180" step="5" value="100">
+      </div>
       <h1 id="reading-title"></h1>
       <label for="speed">速度 <output id="speed-value">90</output> px/s</label>
       <input id="speed" type="range" min="10" max="600" step="5" value="90">
@@ -44,14 +117,35 @@
     </header>
     <main id="pages" tabindex="0" aria-label="书籍页面"></main>
   </section>
+  <dialog id="tag-editor" aria-labelledby="tag-editor-title">
+    <div class="section-title">
+      <h2 id="tag-editor-title">编辑标签</h2>
+      <button id="tag-editor-close" type="button">关闭</button>
+    </div>
+    <p id="tag-book-name"></p>
+    <div id="editable-tags" class="chips"></div>
+    <form id="tag-form">
+      <label for="tag-kind">标签类别</label>
+      <select id="tag-kind">
+        <option value="tags">分类标签</option>
+        <option value="works">作品</option>
+        <option value="actors">登场人物</option>
+        <option value="authors">作者</option>
+      </select>
+      <label for="tag-name">标签名称</label>
+      <input id="tag-name" type="text" required>
+      <button type="submit">添加标签</button>
+    </form>
+    <p id="tag-status" class="status" role="status"></p>
+  </dialog>
   <dialog id="settings" aria-labelledby="settings-title">
     <div class="section-title">
       <h2 id="settings-title">书库设置</h2>
       <button id="settings-close" type="button">关闭</button>
     </div>
     <form id="settings-auth" hidden>
-      <label for="admin-token">管理员令牌</label>
-      <input id="admin-token" type="password" autocomplete="off">
+      <label for="admin-password">管理员密码</label>
+      <input id="admin-password" type="password" autocomplete="current-password">
       <button type="submit">解锁设置</button>
     </form>
     <form id="settings-form" hidden>
@@ -59,6 +153,8 @@
       <input id="pdf-dir" type="text">
       <label for="images-dir">图片文件夹路径</label>
       <input id="images-dir" type="text">
+      <label for="zip-dir">ZIP 文件夹路径</label>
+      <input id="zip-dir" type="text">
       <label for="jm-username">JM 账号</label>
       <input id="jm-username" type="text" autocomplete="off">
       <label for="jm-password">JM 密码</label>

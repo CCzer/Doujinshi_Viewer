@@ -1,25 +1,31 @@
 import argparse
-import hmac
-import ipaddress
 import io
 import logging
+import lzma
 import os
 import re
 import shutil
+import stat
 import subprocess
+import zlib
 from functools import lru_cache
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from threading import Lock, Thread
+from zipfile import BadZipFile, ZipFile
+from urllib.parse import unquote
 
 from PIL import Image, ImageOps
 
 from flask import Flask, abort, jsonify, request, send_file
+from werkzeug.security import check_password_hash, generate_password_hash
 
-from library import IMAGE_TYPES, connect, image_pages, index_pending, make_client, scan
-from settings import load_config, roots, save_config, validate
+from library import IMAGE_TYPES, TAG_GROUPS, connect, image_pages, index_pending, make_client, natural_key, scan
+from settings import default_paths, load_config, roots, save_config, validate
 
 BASE = Path(__file__).resolve().parent
 PAGE_SIZE = re.compile(r"^Page\s+(\d+) size:\s+([\d.]+) x ([\d.]+)", re.M)
+MAX_ZIP_PAGE_BYTES = 64 * 1024 * 1024
+ZIP_ERRORS = (BadZipFile, RuntimeError, EOFError, lzma.LZMAError, zlib.error)
 PAGE_ROT = re.compile(r"^Page\s+(\d+) rot:\s+(\d+)", re.M)
 
 
@@ -46,13 +52,56 @@ def cached_image_pages(folder, signature):
     return image_pages(folder)
 
 
-@lru_cache(maxsize=1024)
-def image_dimensions(path, mtime, size):
-    with Image.open(path) as image:
+def dimensions_of(source):
+    with Image.open(source) as image:
         width, height = image.size
         if image.getexif().get(274) in (5, 6, 7, 8):
             return [height, width]
         return [width, height]
+
+
+@lru_cache(maxsize=1024)
+def image_dimensions(path, mtime, size):
+    return dimensions_of(path)
+
+
+@lru_cache(maxsize=128)
+def zip_entries(path, mtime, size):
+    with ZipFile(path) as archive:
+        pages = []
+        for entry in archive.infolist():
+            name = PurePosixPath(entry.filename.replace('\\', "/"))
+            if (entry.is_dir() or name.suffix.lower() not in IMAGE_TYPES
+                    or any(part.startswith(".") or part == "__MACOSX" for part in name.parts)
+                    or stat.S_ISLNK(entry.external_attr >> 16)):
+                continue
+            if entry.file_size > MAX_ZIP_PAGE_BYTES or entry.flag_bits & 1:
+                continue
+            pages.append((entry, name))
+        return sorted(pages, key=lambda page: natural_key(page[1]))
+
+
+@lru_cache(maxsize=128)
+def zip_page_sizes(path, mtime, size):
+    dimensions = []
+    with ZipFile(path) as archive:
+        for entry, _ in zip_entries(path, mtime, size):
+            try:
+                with archive.open(entry) as source:
+                    dimensions.append(dimensions_of(source))
+            except (OSError, Image.DecompressionBombError) + ZIP_ERRORS:
+                dimensions.append([1, 1])
+    return dimensions
+
+
+def thumbnail_response(source):
+    with Image.open(source) as original:
+        thumbnail = ImageOps.exif_transpose(original).convert("RGB")
+        thumbnail.thumbnail((420, 420))
+        output = io.BytesIO()
+        thumbnail.save(output, "JPEG", quality=85)
+        output.seek(0)
+    return send_file(output, mimetype="image/jpeg", max_age=86400)
 
 
 def create_app(config_path, database, no_jm=False, base=BASE):
@@ -60,7 +109,9 @@ def create_app(config_path, database, no_jm=False, base=BASE):
     app.config["MAX_CONTENT_LENGTH"] = 32_768
     lock = Lock()
     config = load_config(config_path, base)
-    sources = roots(config, base)
+    setup_required = not config["admin_password_hash"]
+    restart_required = False
+    sources = {} if setup_required else roots(config, base)
     index_thread = None
 
     def start_index(refresh=False):
@@ -74,27 +125,56 @@ def create_app(config_path, database, no_jm=False, base=BASE):
         )
         index_thread.start()
 
-    database.parent.mkdir(parents=True, exist_ok=True)
-    scan(sources, database)
-    start_index()
+    if not setup_required:
+        database.parent.mkdir(parents=True, exist_ok=True)
+        scan(sources, database)
+        start_index()
+
+    @app.route("/api/setup", methods=["GET", "POST"])
+    def setup():
+        nonlocal config, setup_required, restart_required
+        with lock:
+            if request.method == "POST":
+                if not setup_required:
+                    return jsonify(error="首次配置已关闭"), 409
+                values = request.get_json(silent=True)
+                if not isinstance(values, dict):
+                    return jsonify(error="配置格式无效"), 400
+                password = values.get("admin_password")
+                if not isinstance(password, str) or not password.strip():
+                    return jsonify(error="请输入管理员密码"), 400
+                try:
+                    updated = validate({
+                        **config,
+                        **{key: values[key] for key in ("pdf_dir", "images_dir", "zip_dir",
+                                                        "jm_username", "jm_password") if key in values},
+                        "admin_password_hash": generate_password_hash(password),
+                    }, base)
+                    save_config(config_path, updated)
+                except (ValueError, OSError) as error:
+                    return jsonify(error=str(error)), 400
+                config = updated
+                setup_required = False
+                restart_required = True
+            response = jsonify(
+                setup_required=setup_required,
+                restart_required=restart_required,
+                default_paths=default_paths(base) if setup_required else {},
+            )
+            response.headers["Cache-Control"] = "no-store"
+            return response
 
     def check_admin():
-        try:
-            local = ipaddress.ip_address(request.remote_addr).is_loopback
-        except ValueError:
-            local = False
-        host = request.host.rsplit(":", 1)[0] if request.host.count(":") == 1 else request.host
-        if local and (host in {"localhost", "127.0.0.1", "[::1]"} or host.startswith("[::1]:")):
-            return
-        token = config["admin_token"]
-        supplied = request.headers.get("X-Admin-Token", "")
-        if not token or not hmac.compare_digest(token.encode(), supplied.encode()):
+        password = unquote(request.headers.get("X-Admin-Password", ""))
+        if not password or not check_password_hash(config["admin_password_hash"], password):
             abort(403)
 
     @app.route("/api/settings", methods=["GET", "POST"])
     def settings():
         nonlocal config, sources
         with lock:
+            if setup_required or restart_required:
+                return jsonify(error="请完成首次配置并重启 Viewer"), 409
             check_admin()
             if request.method == "POST":
                 if not request.is_json:
@@ -104,7 +184,10 @@ def create_app(config_path, database, no_jm=False, base=BASE):
                 values = request.get_json()
                 if not isinstance(values, dict):
                     return jsonify(error="配置格式无效"), 400
-                updated = {**config, **values}
+                updated = {**config, **{
+                    key: values[key] for key in ("pdf_dir", "images_dir", "zip_dir",
+                                                 "jm_username", "jm_password") if key in values
+                }}
                 if values.get("clear_password") is True:
                     updated["jm_password"] = ""
                 elif values.get("jm_username") == "" and not values.get("jm_password"):
@@ -122,7 +205,7 @@ def create_app(config_path, database, no_jm=False, base=BASE):
                 start_index(refresh=values.get("refresh") is True)
 
             response = jsonify(
-                pdf_dir=config["pdf_dir"], images_dir=config["images_dir"],
+                pdf_dir=config["pdf_dir"], images_dir=config["images_dir"], zip_dir=config["zip_dir"],
                 jm_username=config["jm_username"], has_password=bool(config["jm_password"]),
             )
             response.headers["Cache-Control"] = "no-store"
@@ -131,6 +214,8 @@ def create_app(config_path, database, no_jm=False, base=BASE):
     def book_path(book_id):
         with lock:
             current = sources
+        if not current:
+            abort(404)
         with connect(database) as conn:
             book = conn.execute("SELECT * FROM books WHERE id = ?", (book_id,)).fetchone()
         if book is None or book["source"] not in current:
@@ -138,12 +223,12 @@ def create_app(config_path, database, no_jm=False, base=BASE):
         root = current[book["source"]]
         candidate = root / book["path"]
         path = candidate.resolve()
-        is_images = book["source"].startswith("images:")
+        kind = book["source"].split(":", 1)[0] if book["source"].startswith(("images:", "zips:")) else "pdf"
         if candidate.is_symlink() or not path.is_relative_to(root):
             abort(404)
-        if not (path.is_dir() if is_images else path.is_file()):
+        if not (path.is_dir() if kind == "images" else path.is_file()):
             abort(404)
-        return path, is_images, book["mtime"]
+        return path, kind, book["mtime"]
 
     @app.get("/")
     def home():
@@ -159,8 +244,12 @@ def create_app(config_path, database, no_jm=False, base=BASE):
             placeholders = ",".join("?" for _ in current)
             with connect(database) as conn:
                 rows = conn.execute(f"""
-                    SELECT b.id, b.path, b.status, t.kind, t.name
-                    FROM books b LEFT JOIN book_tags t ON b.id = t.book_id
+                    SELECT b.id, b.path,
+                        CASE WHEN m.book_id IS NULL THEN b.status ELSE 'manual' END AS status,
+                        t.kind, t.name
+                    FROM books b
+                    LEFT JOIN manually_classified_books m ON b.id = m.book_id
+                    LEFT JOIN effective_book_tags t ON b.id = t.book_id
                     WHERE b.source IN ({placeholders})
                     ORDER BY b.path, t.kind, t.name
                 """, current).fetchall()
@@ -175,11 +264,36 @@ def create_app(config_path, database, no_jm=False, base=BASE):
         response.headers["X-Indexing"] = "1" if indexing else "0"
         return response
 
+    @app.post("/api/books/<int:book_id>/tags")
+    def edit_tag(book_id):
+        values = request.get_json(silent=True)
+        if not isinstance(values, dict):
+            return jsonify(error="标签数据无效"), 400
+        kind, name, present = values.get("kind"), values.get("name"), values.get("present")
+        if kind not in TAG_GROUPS or not isinstance(name, str) or not name.strip() or type(present) is not bool:
+            return jsonify(error="请填写标签类别和名称"), 400
+
+        with lock:
+            if not sources:
+                abort(404)
+            with connect(database) as conn:
+                book = conn.execute("SELECT source FROM books WHERE id = ?", (book_id,)).fetchone()
+                if book is None or book["source"] not in sources:
+                    abort(404)
+                conn.execute("""
+                    INSERT INTO tag_overrides(book_id, kind, name, present) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(book_id, kind, name) DO UPDATE SET present = excluded.present
+                """, (book_id, kind, name.strip(), present))
+                tags = conn.execute("""
+                    SELECT kind, name FROM effective_book_tags WHERE book_id = ? ORDER BY kind, name
+                """, (book_id,)).fetchall()
+        return jsonify([dict(tag) for tag in tags])
+
     @app.get("/api/books/<int:book_id>/pages")
     def pages(book_id):
-        path, is_images, signature = book_path(book_id)
+        path, kind, signature = book_path(book_id)
         try:
-            if is_images:
+            if kind == "images":
                 dimensions = []
                 for image in cached_image_pages(path, signature):
                     if image.is_symlink() or not image.resolve().is_relative_to(path):
@@ -192,8 +306,9 @@ def create_app(config_path, database, no_jm=False, base=BASE):
                         dimensions.append([1, 1])
             else:
                 stat = path.stat()
-                dimensions = page_sizes(path, stat.st_mtime_ns, stat.st_size)
-        except (OSError, subprocess.SubprocessError):
+                get_sizes = zip_page_sizes if kind == "zips" else page_sizes
+                dimensions = get_sizes(path, stat.st_mtime_ns, stat.st_size)
+        except (OSError, subprocess.SubprocessError) + ZIP_ERRORS:
             abort(422)
         if not dimensions:
             abort(422)
@@ -205,9 +320,9 @@ def create_app(config_path, database, no_jm=False, base=BASE):
 
     @app.get("/api/books/<int:book_id>/pages/<int:page>")
     def page_image(book_id, page, cover=False):
-        path, is_images, signature = book_path(book_id)
+        path, kind, signature = book_path(book_id)
         try:
-            if is_images:
+            if kind == "images":
                 entries = cached_image_pages(path, signature)
                 if not 1 <= page <= len(entries):
                     abort(404)
@@ -217,20 +332,27 @@ def create_app(config_path, database, no_jm=False, base=BASE):
                     abort(404)
                 if not cover:
                     return send_file(image, mimetype=IMAGE_TYPES[entry.suffix.lower()])
-                with Image.open(image) as original:
-                    thumbnail = ImageOps.exif_transpose(original).convert("RGB")
-                    thumbnail.thumbnail((420, 420))
-                    output = io.BytesIO()
-                    thumbnail.save(output, "JPEG", quality=85)
-                    output.seek(0)
-                    return send_file(output, mimetype="image/jpeg", max_age=86400)
+                return thumbnail_response(image)
 
             stat = path.stat()
+            if kind == "zips":
+                entries = zip_entries(path, stat.st_mtime_ns, stat.st_size)
+                if not 1 <= page <= len(entries):
+                    abort(404)
+                entry, name = entries[page - 1]
+                with ZipFile(path) as archive, archive.open(entry) as source:
+                    if cover:
+                        return thumbnail_response(source)
+                    data = source.read(MAX_ZIP_PAGE_BYTES + 1)
+                    if len(data) > MAX_ZIP_PAGE_BYTES:
+                        abort(422)
+                return send_file(io.BytesIO(data), mimetype=IMAGE_TYPES[name.suffix.lower()], max_age=86400)
+
             if not 1 <= page <= len(page_sizes(path, stat.st_mtime_ns, stat.st_size)):
                 abort(404)
             image = poppler("pdftoppm", "-f", str(page), "-l", str(page), "-scale-to",
                             "420" if cover else "1800", "-singlefile", "-jpeg", str(path))
-        except (OSError, subprocess.SubprocessError, Image.DecompressionBombError):
+        except (OSError, subprocess.SubprocessError, Image.DecompressionBombError) + ZIP_ERRORS:
             abort(422)
         return send_file(io.BytesIO(image), mimetype="image/jpeg", max_age=86400)
 
