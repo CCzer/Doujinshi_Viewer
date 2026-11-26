@@ -7,6 +7,7 @@ const pages = byId("pages");
 const toggle = byId("scroll-toggle");
 const speed = byId("speed");
 const pageSize = byId("page-size");
+const bookSearch = byId("book-search");
 const BOOKS_PER_PAGE = 20;
 const COLLAPSED_TAG_COUNT = 15;
 const BOOK_TAG_PREVIEW_COUNT = 5;
@@ -66,7 +67,9 @@ function renderLibrary() {
   for (const key of selected) {
     if (!known.has(key)) selected.delete(key);
   }
-  const shown = books.filter(book => [...selected].every(key => book.tags.some(tag => tagKey(tag) === key)));
+  const query = bookSearch.value.trim().toLowerCase();
+  const shown = books.filter(book => book.name.toLowerCase().includes(query)
+    && [...selected].every(key => book.tags.some(tag => tagKey(tag) === key)));
   const pageCount = Math.max(1, Math.ceil(shown.length / BOOKS_PER_PAGE));
   bookPage = Math.min(bookPage, pageCount);
   const offset = (bookPage - 1) * BOOKS_PER_PAGE;
@@ -79,7 +82,7 @@ function renderLibrary() {
     unresolved ? unresolved + " 本标签待确认" : "",
   ].filter(Boolean).join(" · ");
   byId("clear").hidden = !selected.size;
-  byId("results-title").textContent = selected.size ? "筛选结果" : "全部同人志";
+  byId("results-title").textContent = selected.size || query ? "筛选结果" : "全部同人志";
   byId("count").textContent = shown.length + " 本";
 
   facets.replaceChildren();
@@ -165,7 +168,11 @@ function renderLibrary() {
     }
     results.append(entry);
   }
-  if (!shown.length) showMessage(results, selected.size ? "没有同时包含所选标签的同人志" : "书库为空");
+  if (!shown.length) {
+    const emptyMessage = query ? "没有符合搜索条件的同人志"
+      : selected.size ? "没有同时包含所选标签的同人志" : "书库为空";
+    showMessage(results, emptyMessage);
+  }
   byId("pagination").hidden = pageCount === 1;
   byId("page-number").textContent = "第 " + bookPage + " 页，共 " + pageCount + " 页";
   byId("previous-page").disabled = bookPage === 1;
@@ -272,6 +279,11 @@ toggle.addEventListener("click", () => {
   toggle.textContent = "暂停滚动";
   frame = requestAnimationFrame(scrollFrame);
 });
+bookSearch.addEventListener("input", () => {
+  bookPage = 1;
+  renderLibrary();
+});
+
 byId("clear").addEventListener("click", () => {
   selected.clear();
   bookPage = 1;

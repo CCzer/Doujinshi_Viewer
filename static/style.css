@@ -157,3 +157,15 @@ dialog form input {
 }
 #tag-form button { justify-self: start; }
 #tag-status { margin-top: .6rem; }
+
+.library-search { margin-bottom: 1rem; }
+.library-search input {
+  width: min(100%, 28rem);
+  padding: .5rem .75rem;
+  border: 1px solid var(--line);
+  border-radius: .4rem;
+  background: var(--surface);
+  color: inherit;
+  font: inherit;
+}
+.library-search input::placeholder { color: var(--muted); }
