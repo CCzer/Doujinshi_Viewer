@@ -4,13 +4,22 @@ const byId = id => document.getElementById(id);
 const library = byId("library");
 const reader = byId("reader");
 const pages = byId("pages");
+const pageGuide = byId("page-guide");
+const reverseClick = byId("reverse-click");
+const reverseSwipe = byId("reverse-swipe");
 const toggle = byId("scroll-toggle");
+const autoPageToggle = byId("auto-page-toggle");
+const autoPageDelay = byId("auto-page-delay");
 const speed = byId("speed");
 const pageSize = byId("page-size");
 const bookSearch = byId("book-search");
 const BOOKS_PER_PAGE = 20;
 const COLLAPSED_TAG_COUNT = 15;
 const BOOK_TAG_PREVIEW_COUNT = 5;
+const SWIPE_DISTANCE = 35;
+const WHEEL_PAGE_DISTANCE = 120;
+const WHEEL_GESTURE_GAP = 240;
+const WHEEL_PAGE_COOLDOWN = 400;
 const groups = {works: "作品", actors: "登场人物", tags: "分类标签", authors: "作者"};
 const statuses = {pending: "等待标签", unmatched: "未找到匹配", ambiguous: "存在多个匹配", error: "索引失败"};
 const selected = new Set();
@@ -32,6 +41,15 @@ let loadSequence = 0;
 let frame = null;
 let lastTime = null;
 let remainder = 0;
+let readingMode = "scroll";
+let pageImages = [];
+let readingPage = 0;
+let pageTimer = null;
+let swipeStart = null;
+let pageGuideAnimation = null;
+let wheelDistance = 0;
+let lastWheelAt = -Infinity;
+let wheelLockedUntil = -Infinity;
 
 const tagKey = tag => JSON.stringify([tag.kind, tag.name]);
 
@@ -210,13 +228,122 @@ function scrollFrame(now) {
   frame = requestAnimationFrame(scrollFrame);
 }
 
+function stopAutoPage() {
+  clearTimeout(pageTimer);
+  pageTimer = null;
+  autoPageToggle.setAttribute("aria-pressed", "false");
+  autoPageToggle.textContent = "自动翻页";
+}
+
+function currentScrollPage() {
+  if (pages.scrollTop > 0 && pages.scrollTop + pages.clientHeight >= pages.scrollHeight - 1) {
+    return pageImages.length - 1;
+  }
+  let first = 0;
+  let last = pageImages.length - 1;
+  while (first < last) {
+    const middle = Math.ceil((first + last) / 2);
+    if (pageImages[middle].offsetTop <= pages.scrollTop + 1) first = middle;
+    else last = middle - 1;
+  }
+  return first;
+}
+
+function updateReaderControls() {
+  const paged = readingMode !== "scroll";
+  byId("reverse-click-option").hidden = readingMode !== "click";
+  byId("reverse-swipe-option").hidden = readingMode !== "swipe";
+  byId("reader-page-nav").hidden = !paged;
+  byId("reader-page-number").textContent = pageImages.length
+    ? (readingPage + 1) + " / " + pageImages.length : "";
+  byId("reader-previous").disabled = readingPage === 0 || !pageImages.length;
+  byId("reader-next").disabled = readingPage >= pageImages.length - 1;
+  toggle.disabled = paged || !pageImages.length;
+  speed.disabled = paged;
+  autoPageToggle.disabled = pageImages.length < 2 || (paged && readingPage >= pageImages.length - 1);
+}
+
+function renderReadingMode() {
+  pages.dataset.mode = readingMode;
+  pageImages.forEach((image, index) => {
+    image.hidden = readingMode !== "scroll" && index !== readingPage;
+  });
+  pages.scrollTop = readingMode === "scroll" ? (pageImages[readingPage]?.offsetTop ?? 0) : 0;
+  pages.scrollLeft = 0;
+  updateReaderControls();
+}
+
+function turnReaderPage(direction) {
+  const next = readingPage + direction;
+  if (next < 0 || next >= pageImages.length) return;
+  if (readingMode === "scroll") {
+    pages.scrollTop = pageImages[next].offsetTop;
+  } else {
+    pageImages[readingPage].hidden = true;
+    pageImages[next].hidden = false;
+    pages.scrollTop = 0;
+    pages.scrollLeft = 0;
+  }
+  readingPage = next;
+  updateReaderControls();
+  if (readingPage === pageImages.length - 1) stopAutoPage();
+  else if (pageTimer !== null) scheduleAutoPage();
+}
+
+function scheduleAutoPage() {
+  clearTimeout(pageTimer);
+  pageTimer = setTimeout(() => turnReaderPage(1), autoPageDelay.valueAsNumber * 1000);
+}
+
+function hidePageGuide() {
+  pageGuideAnimation?.cancel();
+  pageGuideAnimation = null;
+  pageGuide.hidden = true;
+}
+
+function showPageGuide() {
+  hidePageGuide();
+  if (readingMode === "scroll") return;
+
+  const click = readingMode === "click";
+  const vertical = readingMode === "swipe-vertical";
+  byId("page-guide-zones").hidden = !click;
+  byId("page-guide-swipe").hidden = click;
+  byId("page-guide-wheel").hidden = !vertical;
+  if (click) {
+    byId("page-guide-first").textContent = reverseClick.checked ? "下一页" : "上一页";
+    byId("page-guide-second").textContent = reverseClick.checked ? "上一页" : "下一页";
+  } else {
+    const direction = vertical ? "up" : reverseSwipe.checked ? "right" : "left";
+    const directions = {up: "上", right: "右", left: "左"};
+    byId("page-guide-arrow").dataset.direction = direction;
+    byId("page-guide-direction").textContent = "向" + directions[direction] + "滑动来翻页";
+  }
+  pageGuide.hidden = false;
+  const keyframes = window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    ? [{opacity: 1}, {opacity: 1}]
+    : [{opacity: 1}, {opacity: 1, offset: .65}, {opacity: 0}];
+  pageGuideAnimation = pageGuide.animate(keyframes, 2400);
+  pageGuideAnimation.onfinish = hidePageGuide;
+}
+
+function resetReader() {
+  stopScroll();
+  hidePageGuide();
+  stopAutoPage();
+  resetPageGestures();
+  pageImages = [];
+  readingPage = 0;
+  updateReaderControls();
+}
+
 async function route() {
   const id = Number(location.hash.match(/^#book\/(\d+)$/)?.[1]);
   const book = books.find(item => item.id === id);
   if (!book) {
     loadSequence++;
     activeBook = null;
-    stopScroll();
+    resetReader();
     reader.hidden = true;
     library.hidden = false;
     pages.replaceChildren();
@@ -225,8 +352,7 @@ async function route() {
   if (activeBook === book.id) return;
   activeBook = book.id;
   const sequence = ++loadSequence;
-  stopScroll();
-  toggle.disabled = true;
+  resetReader();
   library.hidden = true;
   reader.hidden = false;
   byId("reading-title").textContent = book.name;
@@ -247,11 +373,13 @@ async function route() {
       page.style.aspectRatio = width + " / " + height;
       page.loading = index === 0 ? "eager" : "lazy";
       page.decoding = "async";
+      page.draggable = false;
       page.src = endpoint + "/" + (index + 1);
       fragment.append(page);
     });
+    pageImages = [...fragment.children];
     pages.replaceChildren(fragment);
-    toggle.disabled = false;
+    renderReadingMode();
   } catch {
     if (sequence === loadSequence) showMessage(pages, "无法打开此书籍");
   }
@@ -275,10 +403,181 @@ toggle.addEventListener("click", () => {
     stopScroll();
     return;
   }
+  stopAutoPage();
   toggle.setAttribute("aria-pressed", "true");
   toggle.textContent = "暂停滚动";
   frame = requestAnimationFrame(scrollFrame);
 });
+const modeControls = [...document.querySelectorAll('input[name="reader-mode"]')];
+
+function restoreReaderPreferences() {
+  try {
+    const preferences = JSON.parse(localStorage.getItem("reader-preferences"));
+    if (!preferences) return;
+    const savedMode = modeControls.find(control => control.value === preferences.mode);
+    if (savedMode) {
+      savedMode.checked = true;
+      readingMode = savedMode.value;
+    }
+    reverseClick.checked = preferences.reverseClick === true;
+    reverseSwipe.checked = preferences.reverseSwipe === true;
+  } catch {
+    // Keep the reader defaults when browser storage is unavailable.
+  }
+}
+
+function saveReaderPreferences() {
+  try {
+    localStorage.setItem("reader-preferences", JSON.stringify({
+      mode: readingMode,
+      reverseClick: reverseClick.checked,
+      reverseSwipe: reverseSwipe.checked,
+    }));
+  } catch {
+    // The current reader session can still use these options.
+  }
+}
+
+restoreReaderPreferences();
+for (const control of modeControls) {
+  control.addEventListener("change", () => {
+    if (readingMode === "scroll") readingPage = currentScrollPage();
+    readingMode = control.value;
+    saveReaderPreferences();
+    stopScroll();
+    stopAutoPage();
+    resetPageGestures();
+    renderReadingMode();
+    showPageGuide();
+  });
+}
+
+reverseClick.addEventListener("change", () => {
+  saveReaderPreferences();
+  if (readingMode === "click") showPageGuide();
+});
+reverseSwipe.addEventListener("change", () => {
+  saveReaderPreferences();
+  if (readingMode === "swipe") showPageGuide();
+});
+
+byId("reader-previous").addEventListener("click", () => turnReaderPage(-1));
+byId("reader-next").addEventListener("click", () => turnReaderPage(1));
+
+function resetPageGestures() {
+  swipeStart = null;
+  wheelDistance = 0;
+  lastWheelAt = -Infinity;
+  wheelLockedUntil = -Infinity;
+}
+
+function canPanVertically(direction, top = pages.scrollTop) {
+  const maximum = pages.scrollHeight - pages.clientHeight;
+  return direction > 0 ? top < maximum - 1 : top > 1;
+}
+
+pages.addEventListener("click", event => {
+  if (readingMode !== "click") return;
+  const middle = pages.getBoundingClientRect().left + pages.clientWidth / 2;
+  const direction = event.clientX < middle ? -1 : 1;
+  turnReaderPage(reverseClick.checked ? -direction : direction);
+});
+
+pages.addEventListener("pointerdown", event => {
+  if (!["swipe", "swipe-vertical"].includes(readingMode) || !event.isPrimary || event.button !== 0) return;
+  const bounds = pages.getBoundingClientRect();
+  if (event.clientX >= bounds.left + pages.clientWidth || event.clientY >= bounds.top + pages.clientHeight) return;
+  swipeStart = {
+    id: event.pointerId, x: event.clientX, y: event.clientY, scrollTop: pages.scrollTop, panning: false,
+  };
+  pages.setPointerCapture(event.pointerId);
+});
+
+pages.addEventListener("pointermove", event => {
+  if (readingMode !== "swipe-vertical" || swipeStart?.id !== event.pointerId) return;
+  const delta = swipeStart.y - event.clientY;
+  if (!swipeStart.panning && (Math.abs(delta) < 6
+      || Math.abs(delta) <= Math.abs(event.clientX - swipeStart.x)
+      || !canPanVertically(delta, swipeStart.scrollTop))) return;
+  swipeStart.panning = true;
+  pages.scrollTop = swipeStart.scrollTop + delta;
+});
+
+pages.addEventListener("pointercancel", event => {
+  if (swipeStart?.id === event.pointerId) swipeStart = null;
+});
+pages.addEventListener("pointerup", event => {
+  if (swipeStart?.id !== event.pointerId) return;
+  const dx = event.clientX - swipeStart.x;
+  const dy = event.clientY - swipeStart.y;
+  const {panning} = swipeStart;
+  swipeStart = null;
+  if (panning) return;
+
+  const horizontal = readingMode === "swipe";
+  const movement = horizontal ? dx : dy;
+  const crossMovement = horizontal ? dy : dx;
+  if (Math.abs(movement) < SWIPE_DISTANCE || Math.abs(movement) <= Math.abs(crossMovement) * 1.3) return;
+  const direction = movement < 0 ? 1 : -1;
+  turnReaderPage(horizontal && reverseSwipe.checked ? -direction : direction);
+});
+
+pages.addEventListener("wheel", event => {
+  if (readingMode !== "swipe-vertical" || event.ctrlKey || event.shiftKey
+      || Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+  const now = performance.now();
+  if (now < wheelLockedUntil) {
+    event.preventDefault();
+    return;
+  }
+  if (canPanVertically(event.deltaY)) {
+    wheelDistance = 0;
+    return;
+  }
+
+  event.preventDefault();
+  const multiplier = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? pages.clientHeight : 1;
+  const delta = event.deltaY * multiplier;
+  if (now - lastWheelAt > WHEEL_GESTURE_GAP || Math.sign(delta) !== Math.sign(wheelDistance)) {
+    wheelDistance = 0;
+  }
+  lastWheelAt = now;
+  wheelDistance += delta;
+  if (Math.abs(wheelDistance) < WHEEL_PAGE_DISTANCE) return;
+
+  const direction = Math.sign(wheelDistance);
+  wheelDistance = 0;
+  const previous = readingPage;
+  turnReaderPage(direction);
+  if (previous !== readingPage) wheelLockedUntil = now + WHEEL_PAGE_COOLDOWN;
+}, {passive: false});
+
+pages.addEventListener("keydown", event => {
+  if (readingMode === "scroll" || !["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+  event.preventDefault();
+  turnReaderPage(event.key === "ArrowLeft" ? -1 : 1);
+});
+
+autoPageToggle.addEventListener("click", () => {
+  if (pageTimer !== null) {
+    stopAutoPage();
+    return;
+  }
+  if (!autoPageDelay.reportValidity()) return;
+  if (readingMode === "scroll") readingPage = currentScrollPage();
+  stopScroll();
+  if (readingPage >= pageImages.length - 1) return;
+  autoPageToggle.setAttribute("aria-pressed", "true");
+  autoPageToggle.textContent = "暂停翻页";
+  scheduleAutoPage();
+});
+
+autoPageDelay.addEventListener("input", () => {
+  if (pageTimer === null) return;
+  if (autoPageDelay.validity.valid) scheduleAutoPage();
+  else stopAutoPage();
+});
+
 bookSearch.addEventListener("input", () => {
   bookPage = 1;
   renderLibrary();

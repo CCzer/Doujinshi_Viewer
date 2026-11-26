@@ -57,7 +57,8 @@ button[aria-pressed="true"] { background: var(--accent); color: #14221f; border-
 .toolbar h1 { flex: 1 1 240px; font-size: .95rem; overflow-wrap: anywhere; }
 .toolbar label { color: var(--muted); font-size: .875rem; }
 .toolbar input { width: 8rem; accent-color: var(--accent); }
-#pages { flex: 1; overflow: auto; overscroll-behavior: contain; background: #080a0d; }
+.reader-viewport { position: relative; display: flex; flex: 1; min-height: 0; }
+#pages { position: relative; flex: 1; min-width: 0; overflow: auto; overscroll-behavior: contain; background: #080a0d; }
 #pages img { display: block; width: min(var(--page-width, 100%), var(--page-max-width, 1000px)); height: auto; margin: 0 auto .25rem; background: var(--surface); }
 #pages p { margin: 1rem; text-align: center; }
 @media (max-width: 700px) {
@@ -169,3 +170,120 @@ dialog form input {
   font: inherit;
 }
 .library-search input::placeholder { color: var(--muted); }
+
+.reader-controls {
+  display: flex;
+  align-items: center;
+  gap: .5rem 1rem;
+  flex-wrap: wrap;
+  padding: .45rem 1rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+.reading-modes, .reader-page-nav, .auto-page-control {
+  display: flex;
+  align-items: center;
+  gap: .35rem .6rem;
+  flex-wrap: wrap;
+}
+#reading-modes-label { font-size: .875rem; color: var(--muted); }
+.reading-modes label, .reader-controls > label {
+  display: inline-flex;
+  align-items: center;
+  gap: .35rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.reading-modes input, .reader-controls > label input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+.reader-page-nav { flex-wrap: nowrap; white-space: nowrap; }
+.auto-page-control { margin-inline-start: auto; }
+@media (max-width: 700px) {
+  .auto-page-control { margin-inline-start: 0; }
+}
+#auto-page-delay {
+  width: 4.5rem;
+  padding: .25rem .35rem;
+  border: 1px solid var(--line);
+  border-radius: .35rem;
+  background: var(--background);
+  color: inherit;
+  font: inherit;
+}
+#pages[data-mode="click"] { cursor: pointer; }
+#pages[data-mode="swipe"] { touch-action: pan-y pinch-zoom; }
+#pages[data-mode="swipe-vertical"] { touch-action: pan-x pinch-zoom; }
+#pages[data-mode="swipe-vertical"] img {
+  height: var(--page-width, 100%);
+  margin-bottom: 0;
+  object-fit: contain;
+}
+#pages[data-mode^="swipe"] img, #pages[data-mode="click"] img { user-select: none; }
+
+.page-guide {
+  position: absolute;
+  inset: clamp(.4rem, 2vw, 1rem);
+  display: flex;
+  flex-direction: column;
+  gap: .5rem;
+  pointer-events: none;
+}
+.page-guide-zones {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: clamp(.4rem, 2vw, 1rem);
+}
+.page-guide-zones > div {
+  display: grid;
+  place-items: center;
+  border: 1px solid rgb(142 232 204 / .7);
+  border-radius: .65rem;
+  background: rgb(16 27 34 / .38);
+}
+.page-guide-zones span {
+  padding: .45rem .8rem;
+  border-radius: .4rem;
+  background: rgb(16 19 24 / .87);
+  color: var(--accent);
+  font-weight: 650;
+}
+.page-guide-swipe {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: clamp(.25rem, 2vw, .85rem);
+}
+#page-guide-arrow {
+  grid-area: 2 / 2;
+  width: clamp(6rem, min(24vw, 32dvh), 15rem);
+  aspect-ratio: 1;
+  background: var(--accent);
+  clip-path: polygon(evenodd,
+    4% 32%, 53% 32%, 53% 6%, 96% 50%, 53% 94%, 53% 68%, 4% 68%, 4% 32%,
+    8% 36%, 8% 64%, 57% 64%, 57% 84%, 90% 50%, 57% 16%, 57% 36%, 8% 36%
+  );
+}
+#page-guide-arrow[data-direction="up"] { transform: rotate(-90deg); }
+#page-guide-arrow[data-direction="left"] { transform: rotate(180deg); }
+#page-guide-wheel, #page-guide-direction {
+  color: #fff;
+  font-weight: 650;
+  text-shadow: 0 1px 3px #000, 0 0 8px #000;
+}
+.page-guide-caption {
+  grid-area: 3 / 1 / 4 / -1;
+  place-self: start center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: .2rem;
+  text-align: center;
+}
+#page-guide-direction { font-size: clamp(1rem, 3vw, 1.4rem); }
+#page-guide-wheel { font-size: .875rem; }

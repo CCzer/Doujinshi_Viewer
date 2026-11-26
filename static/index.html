@@ -116,9 +116,46 @@
       <h1 id="reading-title"></h1>
       <label for="speed">速度 <output id="speed-value">90</output> px/s</label>
       <input id="speed" type="range" min="10" max="600" step="5" value="90">
-      <button id="scroll-toggle" disabled aria-pressed="false">自动滚动</button>
+      <button id="scroll-toggle" type="button" disabled aria-pressed="false">自动滚动</button>
     </header>
-    <main id="pages" tabindex="0" aria-label="书籍页面"></main>
+    <div class="reader-controls">
+      <div class="reading-modes" role="radiogroup" aria-labelledby="reading-modes-label">
+        <span id="reading-modes-label">翻页方式</span>
+        <label><input type="radio" name="reader-mode" value="click"> 点击翻页</label>
+        <label><input type="radio" name="reader-mode" value="swipe"> 左右滑动翻页</label>
+        <label><input type="radio" name="reader-mode" value="swipe-vertical"> 上下滑动翻页</label>
+        <label><input type="radio" name="reader-mode" value="scroll" checked> 无缝滚动</label>
+      </div>
+      <label id="reverse-click-option" hidden><input id="reverse-click" type="checkbox"> 反转点击方向</label>
+      <label id="reverse-swipe-option" hidden><input id="reverse-swipe" type="checkbox"> 反转左右滑动方向</label>
+      <div class="reader-page-nav" id="reader-page-nav" hidden>
+        <button id="reader-previous" type="button" disabled>上一页</button>
+        <span id="reader-page-number" role="status"></span>
+        <button id="reader-next" type="button" disabled>下一页</button>
+      </div>
+      <div class="auto-page-control">
+        <label for="auto-page-delay">翻页间隔</label>
+        <input id="auto-page-delay" type="number" min="1" max="120" step="1" value="5" required>
+        <span>秒</span>
+        <button id="auto-page-toggle" type="button" disabled aria-pressed="false">自动翻页</button>
+      </div>
+    </div>
+    <div class="reader-viewport">
+      <main id="pages" tabindex="0" aria-label="书籍页面"></main>
+      <div id="page-guide" class="page-guide" aria-hidden="true" hidden>
+        <div id="page-guide-zones" class="page-guide-zones" hidden>
+          <div><span id="page-guide-first"></span></div>
+          <div><span id="page-guide-second"></span></div>
+        </div>
+        <div id="page-guide-swipe" class="page-guide-swipe" hidden>
+          <span id="page-guide-arrow"></span>
+          <div class="page-guide-caption">
+            <span id="page-guide-direction"></span>
+            <span id="page-guide-wheel" hidden>也可使用鼠标滚轮翻页</span>
+          </div>
+        </div>
+      </div>
+    </div>
   </section>
   <dialog id="tag-editor" aria-labelledby="tag-editor-title">
     <div class="section-title">
