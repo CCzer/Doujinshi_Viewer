@@ -27,6 +27,9 @@
         <input id="setup-jm-username" type="text" autocomplete="off">
         <label for="setup-jm-password">JM 密码</label>
         <input id="setup-jm-password" type="password" autocomplete="new-password">
+        <label for="setup-nhentai-api-key">nHentai API Key（可选）</label>
+        <input id="setup-nhentai-api-key" type="password" autocomplete="off">
+        <p class="status">留空会使用匿名查询，可能更容易遇到速率限制。可在 <a href="https://nhentai.net/user/settings#apikeys">nHentai 账户设置</a> 创建 API Key。</p>
       </section>
       <section class="setup-panel" hidden>
         <h2>PDF 文件夹</h2>
@@ -77,12 +80,20 @@
       <h1>同人志书库</h1>
       <div class="masthead-actions">
         <p id="summary" role="status"></p>
+        <button id="library-refresh" type="button">刷新书库</button>
         <button id="settings-open" type="button">设置</button>
       </div>
     </header>
+    <p id="library-refresh-status" class="status" role="status" hidden></p>
     <div class="layout">
       <aside aria-label="标签筛选">
-        <div class="section-title"><h2>标签索引</h2><button id="clear" hidden>清除</button></div>
+        <div class="section-title">
+          <h2>标签索引</h2>
+          <div class="tag-index-actions">
+            <button id="aliases-open" type="button">合并标签</button>
+            <button id="clear" type="button" hidden>清除</button>
+          </div>
+        </div>
         <div id="facets"></div>
       </aside>
       <section aria-labelledby="results-title" class="results">
@@ -107,39 +118,42 @@
     </div>
   </main>
   <section id="reader" hidden aria-label="阅读器">
-    <header class="toolbar">
-      <a id="back" href="#">返回书库</a>
-      <div class="size-control">
-        <label for="page-size">页面大小 <output id="page-size-value" for="page-size">100%</output></label>
-        <input id="page-size" type="range" min="40" max="180" step="5" value="100">
-      </div>
-      <h1 id="reading-title"></h1>
-      <label for="speed">速度 <output id="speed-value">90</output> px/s</label>
-      <input id="speed" type="range" min="10" max="600" step="5" value="90">
-      <button id="scroll-toggle" type="button" disabled aria-pressed="false">自动滚动</button>
-    </header>
-    <div class="reader-controls">
-      <div class="reading-modes" role="radiogroup" aria-labelledby="reading-modes-label">
-        <span id="reading-modes-label">翻页方式</span>
-        <label><input type="radio" name="reader-mode" value="click"> 点击翻页</label>
-        <label><input type="radio" name="reader-mode" value="swipe"> 左右滑动翻页</label>
-        <label><input type="radio" name="reader-mode" value="swipe-vertical"> 上下滑动翻页</label>
-        <label><input type="radio" name="reader-mode" value="scroll" checked> 无缝滚动</label>
-      </div>
-      <label id="reverse-click-option" hidden><input id="reverse-click" type="checkbox"> 反转点击方向</label>
-      <label id="reverse-swipe-option" hidden><input id="reverse-swipe" type="checkbox"> 反转左右滑动方向</label>
-      <div class="reader-page-nav" id="reader-page-nav" hidden>
-        <button id="reader-previous" type="button" disabled>上一页</button>
-        <span id="reader-page-number" role="status"></span>
-        <button id="reader-next" type="button" disabled>下一页</button>
-      </div>
-      <div class="auto-page-control">
-        <label for="auto-page-delay">翻页间隔</label>
-        <input id="auto-page-delay" type="number" min="1" max="120" step="1" value="5" required>
-        <span>秒</span>
-        <button id="auto-page-toggle" type="button" disabled aria-pressed="false">自动翻页</button>
+    <div id="reader-toolbar">
+      <header class="toolbar">
+        <a id="back" href="#">返回书库</a>
+        <div class="size-control">
+          <label for="page-size">页面大小 <output id="page-size-value" for="page-size">100%</output></label>
+          <input id="page-size" type="range" min="40" max="180" step="5" value="100">
+        </div>
+        <h1 id="reading-title"></h1>
+        <label for="speed">速度 <output id="speed-value">90</output> px/s</label>
+        <input id="speed" type="range" min="10" max="600" step="5" value="90">
+        <button id="scroll-toggle" type="button" disabled aria-pressed="false">自动滚动</button>
+      </header>
+      <div class="reader-controls">
+        <div class="reading-modes" role="radiogroup" aria-labelledby="reading-modes-label">
+          <span id="reading-modes-label">翻页方式</span>
+          <label><input type="radio" name="reader-mode" value="click"> 点击翻页</label>
+          <label><input type="radio" name="reader-mode" value="swipe"> 左右滑动翻页</label>
+          <label><input type="radio" name="reader-mode" value="swipe-vertical"> 上下滑动翻页</label>
+          <label><input type="radio" name="reader-mode" value="scroll" checked> 无缝滚动</label>
+        </div>
+        <label id="reverse-click-option" hidden><input id="reverse-click" type="checkbox"> 反转点击方向</label>
+        <label id="reverse-swipe-option" hidden><input id="reverse-swipe" type="checkbox"> 反转左右滑动方向</label>
+        <div class="reader-page-nav" id="reader-page-nav" hidden>
+          <button id="reader-previous" type="button" disabled>上一页</button>
+          <span id="reader-page-number" role="status"></span>
+          <button id="reader-next" type="button" disabled>下一页</button>
+        </div>
+        <div class="auto-page-control">
+          <label for="auto-page-delay">翻页间隔</label>
+          <input id="auto-page-delay" type="number" min="1" max="120" step="1" value="5" required>
+          <span>秒</span>
+          <button id="auto-page-toggle" type="button" disabled aria-pressed="false">自动翻页</button>
+        </div>
       </div>
     </div>
+    <button id="show-reader-toolbar" type="button" aria-controls="reader-toolbar" hidden>显示阅读工具栏</button>
     <div class="reader-viewport">
       <main id="pages" tabindex="0" aria-label="书籍页面"></main>
       <div id="page-guide" class="page-guide" aria-hidden="true" hidden>
@@ -157,12 +171,44 @@
       </div>
     </div>
   </section>
+  <dialog id="tag-aliases" aria-labelledby="tag-aliases-title">
+    <div class="section-title">
+      <h2 id="tag-aliases-title">合并标签</h2>
+      <button id="aliases-close" type="button">关闭</button>
+    </div>
+    <form id="aliases-form">
+      <label for="alias-kind">标签类别</label>
+      <select id="alias-kind">
+        <option value="works">作品</option>
+        <option value="actors">登场人物</option>
+        <option value="tags">分类标签</option>
+        <option value="authors">作者</option>
+      </select>
+      <label for="alias-source">原标签</label>
+      <div>
+        <input id="alias-source" type="text" role="combobox" aria-autocomplete="list"
+          aria-controls="alias-source-suggestions" aria-expanded="false" autocomplete="off" required>
+        <ul id="alias-source-suggestions" class="tag-suggestions" role="listbox" aria-label="原标签候选" hidden></ul>
+      </div>
+      <label for="alias-target">合并到</label>
+      <div>
+        <input id="alias-target" type="text" role="combobox" aria-autocomplete="list"
+          aria-controls="alias-target-suggestions" aria-expanded="false" autocomplete="off" required>
+        <ul id="alias-target-suggestions" class="tag-suggestions" role="listbox" aria-label="目标标签候选" hidden></ul>
+      </div>
+      <button type="submit">合并</button>
+    </form>
+    <p id="aliases-status" class="status" role="status"></p>
+    <button id="aliases-expand" type="button" aria-controls="aliases-list" aria-expanded="false" hidden>展开</button>
+    <ul id="aliases-list"></ul>
+  </dialog>
   <dialog id="tag-editor" aria-labelledby="tag-editor-title">
     <div class="section-title">
       <h2 id="tag-editor-title">编辑标签</h2>
       <button id="tag-editor-close" type="button">关闭</button>
     </div>
     <p id="tag-book-name"></p>
+    <p id="tag-book-source" class="status" hidden></p>
     <div id="editable-tags" class="chips"></div>
     <form id="tag-form">
       <label for="tag-kind">标签类别</label>
@@ -173,7 +219,11 @@
         <option value="authors">作者</option>
       </select>
       <label for="tag-name">标签名称</label>
-      <input id="tag-name" type="text" required>
+      <div class="tag-name-field">
+        <input id="tag-name" type="text" role="combobox" aria-autocomplete="list"
+          aria-controls="tag-suggestions" aria-expanded="false" autocomplete="off" required>
+        <ul id="tag-suggestions" class="tag-suggestions" role="listbox" aria-label="已有标签" hidden></ul>
+      </div>
       <button type="submit">添加标签</button>
     </form>
     <p id="tag-status" class="status" role="status"></p>
@@ -199,6 +249,12 @@
       <input id="jm-username" type="text" autocomplete="off">
       <label for="jm-password">JM 密码</label>
       <input id="jm-password" type="password" autocomplete="new-password">
+      <label for="nhentai-api-key">nHentai API Key（可选）</label>
+      <input id="nhentai-api-key" type="password" autocomplete="off" aria-describedby="nhentai-key-help">
+      <p id="nhentai-key-help" class="status">留空会使用匿名查询，可能更容易遇到速率限制。可在 <a href="https://nhentai.net/user/settings#apikeys">nHentai 账户设置</a> 创建 API Key。</p>
+      <label id="clear-nhentai-key-option" class="settings-checkbox" hidden>
+        <input id="clear-nhentai-api-key" type="checkbox"> 清除已保存的 nHentai API Key
+      </label>
       <div class="settings-actions">
         <button type="submit" value="save">保存并扫描</button>
         <button type="submit" value="refresh">保存并刷新全部标签</button>

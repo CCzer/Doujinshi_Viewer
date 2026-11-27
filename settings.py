@@ -4,7 +4,8 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 DEFAULT_PATHS = {"pdf_dir": "books/pdf", "images_dir": "books/images", "zip_dir": "books/zip"}
-FIELDS = ("pdf_dir", "images_dir", "zip_dir", "jm_username", "jm_password", "admin_password_hash")
+USER_FIELDS = ("pdf_dir", "images_dir", "zip_dir", "jm_username", "jm_password", "nhentai_api_key")
+FIELDS = (*USER_FIELDS, "admin_password_hash")
 
 
 def validate(values, base):
@@ -18,6 +19,7 @@ def validate(values, base):
         if config[field] and not (base / Path(config[field]).expanduser()).is_dir():
             raise ValueError("配置的文件夹不存在：" + field)
     config["jm_username"] = config["jm_username"].strip()
+    config["nhentai_api_key"] = config["nhentai_api_key"].strip()
     if bool(config["jm_username"]) != bool(config["jm_password"]):
         raise ValueError("JM 账号和密码必须同时填写")
     return config

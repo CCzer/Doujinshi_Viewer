@@ -4,6 +4,7 @@ import re
 import sqlite3
 import unicodedata
 from contextlib import contextmanager
+from functools import lru_cache
 from pathlib import Path
 
 TAG_GROUPS = ("works", "actors", "tags", "authors")
@@ -38,6 +39,22 @@ def title_key(title):
         char for char in unicodedata.normalize("NFKC", title).casefold()
         if not char.isspace() and not unicodedata.category(char).startswith("P")
     )
+
+
+@lru_cache(maxsize=1)
+def simplified_converter():
+    try:
+        from opencc import OpenCC
+    except ImportError:
+        return None
+    return OpenCC("t2s.json")
+
+
+@lru_cache(maxsize=4096)
+def tag_search_key(value):
+    normalized = " ".join(unicodedata.normalize("NFKC", value).casefold().split())
+    converter = simplified_converter()
+    return converter.convert(normalized) if converter else normalized
 
 
 @contextmanager
@@ -157,8 +174,42 @@ def scan(sources, database):
                   )
                 UNION ALL
                 SELECT book_id, kind, name FROM tag_overrides WHERE present = 1;
+            CREATE TABLE IF NOT EXISTS tag_aliases (
+                kind TEXT NOT NULL,
+                alias TEXT NOT NULL,
+                target TEXT NOT NULL,
+                PRIMARY KEY (kind, alias),
+                CHECK (alias != target)
+            );
+            CREATE VIEW IF NOT EXISTS resolved_tag_aliases AS
+                WITH RECURSIVE chain(kind, alias, target) AS (
+                    SELECT kind, alias, target FROM tag_aliases
+                    UNION
+                    SELECT c.kind, c.alias, a.target
+                    FROM chain c JOIN tag_aliases a ON a.kind = c.kind AND a.alias = c.target
+                )
+                SELECT c.kind, c.alias, c.target FROM chain c
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM tag_aliases a WHERE a.kind = c.kind AND a.alias = c.target
+                );
+            CREATE VIEW IF NOT EXISTS visible_book_tags AS
+                WITH normalized AS (
+                    SELECT t.book_id, t.kind, COALESCE(a.target, t.name) AS name
+                    FROM effective_book_tags t
+                    LEFT JOIN resolved_tag_aliases a ON a.kind = t.kind AND a.alias = t.name
+                )
+                SELECT DISTINCT n.book_id, n.kind, n.name
+                FROM normalized n
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM tag_overrides o
+                    WHERE o.book_id = n.book_id AND o.kind = n.kind AND o.name = n.name
+                      AND o.present = 0
+                );
             COMMIT;
         """)
+        if "album_source" not in {column["name"] for column in conn.execute("PRAGMA table_info(books)")}:
+            conn.execute("ALTER TABLE books ADD COLUMN album_source TEXT")
+            conn.execute("UPDATE books SET album_source = 'jm' WHERE album IS NOT NULL")
         for source, files in discovered.items():
             existing = conn.execute("SELECT * FROM books WHERE source = ?", (source,))
             for row in existing.fetchall():
@@ -218,44 +269,66 @@ def find_album(client, candidates):
     return None, "unmatched"
 
 
-def index_pending(sources, database, client_factory, refresh=False):
+def index_pending(sources, database, client_factory, refresh=False, retry_failed=False, nhentai_lookup=None):
+    if not sources:
+        return
+
+    placeholders = ",".join("?" for _ in sources)
     with connect(database) as conn:
-        pending = [
-            row
-            for source in sources
-            for row in conn.execute("""
-                SELECT id, source, path, status FROM books
-                WHERE source = ? AND (? OR status != 'indexed') ORDER BY path
-            """, (source, refresh))
-        ]
-        conn.executemany("UPDATE books SET status = 'pending' WHERE id = ?",
-                         ((book["id"],) for book in pending if book["status"] != "indexed"))
+        pending = conn.execute(f"""
+            SELECT id, source, path, status FROM books
+            WHERE source IN ({placeholders})
+              AND (status = 'pending' OR ? OR (? AND status != 'indexed'))
+            ORDER BY CASE status WHEN 'pending' THEN 0 WHEN 'indexed' THEN 2 ELSE 1 END,
+                     path, source
+        """, (*sources, refresh, retry_failed)).fetchall()
     if not pending:
         return
 
-    try:
-        client = client_factory()
-    except Exception as error:
-        LOG.error("JM 客户端初始化失败 (%s)", type(error).__name__)
-        with connect(database) as conn:
-            conn.executemany("UPDATE books SET status = 'error' WHERE id = ?",
-                             ((book["id"],) for book in pending if book["status"] != "indexed"))
-        return
+    jm_client = None
+    jm_init_error = None
+
+    def lookup_jm(candidates, _title):
+        nonlocal jm_client, jm_init_error
+        if jm_init_error is not None:
+            raise jm_init_error
+        if jm_client is None:
+            try:
+                jm_client = client_factory()
+            except Exception as error:
+                jm_init_error = error
+                raise
+        return find_album(jm_client, candidates)[0]
+
+    providers = [("jm", lookup_jm)]
+    if nhentai_lookup is not None:
+        providers.insert(0, ("nhentai", nhentai_lookup))
 
     for book in pending:
-        try:
-            path = Path(book["path"])
-            title = path.name if book["source"].startswith("images:") else path.stem
-            album, status = find_album(client, titles(title))
-            tags = [
-                (book["id"], kind, name.strip())
-                for kind in TAG_GROUPS if album
-                for name in getattr(album, kind)
-                if name.strip()
-            ]
-        except Exception as error:
-            LOG.warning("索引失败 %s (%s)", book["path"], type(error).__name__)
-            album, status, tags = None, "error", []
+        path = Path(book["path"])
+        title = path.name if book["source"].startswith("images:") else path.stem
+        candidates = titles(title)
+        failed = False
+        for album_source, lookup in providers if candidates else ():
+            try:
+                album = lookup(candidates, title)
+                if album is None:
+                    continue
+                tags = [
+                    (book["id"], kind, name.strip())
+                    for kind in TAG_GROUPS
+                    for name in getattr(album, kind)
+                    if name.strip()
+                ]
+            except Exception as error:
+                LOG.warning("索引失败 [%s] %s (%s)", album_source, book["path"], type(error).__name__)
+                failed = True
+                continue
+            status = "indexed"
+            break
+        else:
+            album, album_source, tags = None, None, []
+            status = "error" if failed else "unmatched"
 
         if album is None and book["status"] == "indexed":
             LOG.warning("刷新未获得新标签，保留已有标签 %s", book["path"])
@@ -265,9 +338,13 @@ def index_pending(sources, database, client_factory, refresh=False):
             tags.append((book["id"], "tags", "未分类"))
 
         with connect(database) as conn:
+            updated = conn.execute(
+                "UPDATE books SET status = ?, album = ?, album_source = ? WHERE id = ?",
+                (status, album.album_id if album else None, album_source if album else None, book["id"]),
+            )
+            if not updated.rowcount:
+                continue
             if status != "error":
                 conn.execute("DELETE FROM book_tags WHERE book_id = ?", (book["id"],))
             conn.executemany("INSERT OR IGNORE INTO book_tags VALUES (?, ?, ?)", tags)
-            conn.execute("UPDATE books SET status = ?, album = ? WHERE id = ?",
-                         (status, album.album_id if album else None, book["id"]))
         LOG.info("%s %s", status, book["path"])

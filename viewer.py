@@ -5,6 +5,7 @@ import lzma
 import os
 import re
 import shutil
+import sqlite3
 import stat
 import subprocess
 import zlib
@@ -19,8 +20,9 @@ from PIL import Image, ImageOps
 from flask import Flask, abort, jsonify, request, send_file
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from library import IMAGE_TYPES, TAG_GROUPS, connect, image_pages, index_pending, make_client, natural_key, scan
-from settings import default_paths, load_config, roots, save_config, validate
+from library import IMAGE_TYPES, TAG_GROUPS, connect, image_pages, index_pending, make_client, natural_key, scan, tag_search_key
+from nhentai import NhentaiClient
+from settings import USER_FIELDS, default_paths, load_config, roots, save_config, validate
 
 BASE = Path(__file__).resolve().parent
 PAGE_SIZE = re.compile(r"^Page\s+(\d+) size:\s+([\d.]+) x ([\d.]+)", re.M)
@@ -113,16 +115,31 @@ def create_app(config_path, database, no_jm=False, base=BASE):
     restart_required = False
     sources = {} if setup_required else roots(config, base)
     index_thread = None
+    retry_queued = False
+    nhentai = NhentaiClient(config["nhentai_api_key"])
 
-    def start_index(refresh=False):
-        nonlocal index_thread
+    def start_index(refresh=False, retry_failed=False):
+        nonlocal index_thread, nhentai
         if no_jm or not sources:
             return
+        current_sources = sources
         credentials = (config["jm_username"], config["jm_password"])
-        index_thread = Thread(
-            target=index_pending, args=(sources, database, lambda: make_client(credentials)),
-            kwargs={"refresh": refresh}, daemon=True,
-        )
+        if nhentai.api_key != config["nhentai_api_key"]:
+            nhentai = NhentaiClient(config["nhentai_api_key"])
+
+        def run_index():
+            nonlocal index_thread, retry_queued
+            try:
+                index_pending(current_sources, database, lambda: make_client(credentials),
+                              refresh=refresh, retry_failed=retry_failed, nhentai_lookup=nhentai.find_album)
+            finally:
+                with lock:
+                    index_thread = None
+                    if retry_queued:
+                        retry_queued = False
+                        start_index(retry_failed=True)
+
+        index_thread = Thread(target=run_index, daemon=True)
         index_thread.start()
 
     if not setup_required:
@@ -146,8 +163,7 @@ def create_app(config_path, database, no_jm=False, base=BASE):
                 try:
                     updated = validate({
                         **config,
-                        **{key: values[key] for key in ("pdf_dir", "images_dir", "zip_dir",
-                                                        "jm_username", "jm_password") if key in values},
+                        **{key: values[key] for key in USER_FIELDS if key in values},
                         "admin_password_hash": generate_password_hash(password),
                     }, base)
                     save_config(config_path, updated)
@@ -179,21 +195,24 @@ def create_app(config_path, database, no_jm=False, base=BASE):
             if request.method == "POST":
                 if not request.is_json:
                     return jsonify(error="请提交 JSON 配置"), 400
-                if index_thread and index_thread.is_alive():
+                if index_thread is not None:
                     return jsonify(error="标签更新正在进行，请稍后再试"), 409
                 values = request.get_json()
                 if not isinstance(values, dict):
                     return jsonify(error="配置格式无效"), 400
-                updated = {**config, **{
-                    key: values[key] for key in ("pdf_dir", "images_dir", "zip_dir",
-                                                 "jm_username", "jm_password") if key in values
-                }}
+                updated = {**config, **{key: values[key] for key in USER_FIELDS if key in values}}
                 if values.get("clear_password") is True:
                     updated["jm_password"] = ""
                 elif values.get("jm_username") == "" and not values.get("jm_password"):
                     updated["jm_password"] = ""
                 elif not values.get("jm_password"):
                     updated["jm_password"] = config["jm_password"]
+                if values.get("clear_nhentai_api_key") is True:
+                    updated["nhentai_api_key"] = ""
+                elif "nhentai_api_key" not in values or (
+                    isinstance(values["nhentai_api_key"], str) and not values["nhentai_api_key"].strip()
+                ):
+                    updated["nhentai_api_key"] = config["nhentai_api_key"]
                 try:
                     updated = validate(updated, base)
                     updated_sources = roots(updated, base)
@@ -202,11 +221,12 @@ def create_app(config_path, database, no_jm=False, base=BASE):
                 except (ValueError, OSError) as error:
                     return jsonify(error=str(error)), 400
                 config, sources = updated, updated_sources
-                start_index(refresh=values.get("refresh") is True)
+                start_index(refresh=values.get("refresh") is True, retry_failed=True)
 
             response = jsonify(
                 pdf_dir=config["pdf_dir"], images_dir=config["images_dir"], zip_dir=config["zip_dir"],
                 jm_username=config["jm_username"], has_password=bool(config["jm_password"]),
+                has_nhentai_api_key=bool(config["nhentai_api_key"]),
             )
             response.headers["Cache-Control"] = "no-store"
             return response
@@ -234,11 +254,30 @@ def create_app(config_path, database, no_jm=False, base=BASE):
     def home():
         return app.send_static_file("index.html")
 
+    @app.post("/api/library/refresh")
+    def refresh_library():
+        nonlocal retry_queued
+        if not request.is_json:
+            return jsonify(error="请提交 JSON 请求"), 400
+        with lock:
+            if setup_required or restart_required:
+                return jsonify(error="请完成首次配置并重启 Viewer"), 409
+            try:
+                scan(sources, database)
+            except (OSError, sqlite3.Error) as error:
+                logging.error("扫描书库失败 (%s)", type(error).__name__)
+                return jsonify(error="扫描书库失败，请检查目录和数据库后重试"), 500
+            if index_thread is not None:
+                retry_queued = True
+                return jsonify(queued=True)
+            start_index(retry_failed=True)
+            return jsonify(queued=False, indexing=index_thread is not None)
+
     @app.get("/api/library")
     def library():
         with lock:
             current = tuple(sources)
-            indexing = index_thread is not None and index_thread.is_alive()
+            indexing = index_thread is not None
         books = {}
         if current:
             placeholders = ",".join("?" for _ in current)
@@ -246,23 +285,107 @@ def create_app(config_path, database, no_jm=False, base=BASE):
                 rows = conn.execute(f"""
                     SELECT b.id, b.path,
                         CASE WHEN m.book_id IS NULL THEN b.status ELSE 'manual' END AS status,
-                        t.kind, t.name
+                        b.album_source, t.kind, t.name
                     FROM books b
                     LEFT JOIN manually_classified_books m ON b.id = m.book_id
-                    LEFT JOIN effective_book_tags t ON b.id = t.book_id
+                    LEFT JOIN visible_book_tags t ON b.id = t.book_id
                     WHERE b.source IN ({placeholders})
                     ORDER BY b.path, t.kind, t.name
                 """, current).fetchall()
             for row in rows:
                 book = books.setdefault(row["id"], {
                     "id": row["id"], "name": Path(row["path"]).name,
-                    "status": row["status"], "tags": [],
+                    "status": row["status"], "tag_source": row["album_source"], "tags": [],
                 })
                 if row["kind"]:
                     book["tags"].append({"kind": row["kind"], "name": row["name"]})
         response = jsonify(list(books.values()))
         response.headers["X-Indexing"] = "1" if indexing else "0"
         return response
+
+    @app.get("/api/tags/suggestions")
+    def tag_suggestions():
+        kind = request.args.get("kind")
+        if kind not in TAG_GROUPS:
+            return jsonify(error="无法识别标签类别"), 400
+        query = tag_search_key(request.args.get("q", ""))
+        merge = request.args.get("scope") == "merge"
+        with lock:
+            if setup_required or restart_required:
+                return jsonify([])
+            current = tuple(sources)
+        if not merge and (not query or not current):
+            return jsonify([])
+
+        counts = {}
+        with connect(database) as conn:
+            if current:
+                placeholders = ",".join("?" for _ in current)
+                counts = dict(conn.execute(f"""
+                    SELECT t.name, COUNT(*)
+                    FROM visible_book_tags t JOIN books b ON b.id = t.book_id
+                    WHERE t.kind = ? AND b.source IN ({placeholders})
+                    GROUP BY t.name
+                """, (kind, *current)))
+            if merge:
+                aliases = conn.execute(
+                    "SELECT alias, target FROM tag_aliases WHERE kind = ?", (kind,)
+                ).fetchall()
+                for alias in aliases:
+                    counts.setdefault(alias["target"], 0)
+                for alias in aliases:
+                    counts.pop(alias["alias"], None)
+
+        matches = []
+        for name, uses in counts.items():
+            key = tag_search_key(name)
+            position = key.find(query)
+            if position >= 0:
+                matches.append((key != query, position, -uses, name))
+        return jsonify([name for _, _, _, name in sorted(matches)[:12]])
+
+    @app.route("/api/tag-aliases", methods=["GET", "POST", "DELETE"])
+    def tag_aliases():
+        method = request.method
+        if method != "GET":
+            values = request.get_json(silent=True)
+            if not isinstance(values, dict):
+                return jsonify(error="标签数据无效"), 400
+            kind, alias = values.get("kind"), values.get("alias")
+            if kind not in TAG_GROUPS or not isinstance(alias, str) or not alias.strip():
+                return jsonify(error="请选择标签类别并填写原标签"), 400
+            alias = alias.strip()
+            if method == "POST":
+                target = values.get("target")
+                if not isinstance(target, str) or not target.strip():
+                    return jsonify(error="请填写要合并到的标签"), 400
+                target = target.strip()
+
+        with lock:
+            if setup_required or restart_required:
+                return jsonify(error="请完成首次配置并重启 Viewer"), 409
+            with connect(database) as conn:
+                if method == "POST":
+                    conn.execute("BEGIN IMMEDIATE")
+                    circular = conn.execute("""
+                        WITH RECURSIVE chain(name) AS (
+                            SELECT ?
+                            UNION
+                            SELECT a.target FROM tag_aliases a JOIN chain c ON a.alias = c.name
+                            WHERE a.kind = ?
+                        )
+                        SELECT 1 FROM chain WHERE name = ?
+                    """, (target, kind, alias)).fetchone()
+                    if circular:
+                        return jsonify(error="不能合并到自身，也不能创建循环合并"), 400
+                    conn.execute("""
+                        INSERT INTO tag_aliases(kind, alias, target) VALUES (?, ?, ?)
+                        ON CONFLICT(kind, alias) DO UPDATE SET target = excluded.target
+                    """, (kind, alias, target))
+                elif method == "DELETE":
+                    conn.execute("DELETE FROM tag_aliases WHERE kind = ? AND alias = ?", (kind, alias))
+                rows = conn.execute("SELECT kind, alias, target FROM tag_aliases ORDER BY kind, alias").fetchall()
+        return jsonify([dict(row) for row in rows])
 
     @app.post("/api/books/<int:book_id>/tags")
     def edit_tag(book_id):
@@ -280,12 +403,18 @@ def create_app(config_path, database, no_jm=False, base=BASE):
                 book = conn.execute("SELECT source FROM books WHERE id = ?", (book_id,)).fetchone()
                 if book is None or book["source"] not in sources:
                     abort(404)
+                name = name.strip()
+                resolved = conn.execute("""
+                    SELECT target FROM resolved_tag_aliases WHERE kind = ? AND alias = ?
+                """, (kind, name)).fetchone()
+                if resolved:
+                    name = resolved["target"]
                 conn.execute("""
                     INSERT INTO tag_overrides(book_id, kind, name, present) VALUES (?, ?, ?, ?)
                     ON CONFLICT(book_id, kind, name) DO UPDATE SET present = excluded.present
-                """, (book_id, kind, name.strip(), present))
+                """, (book_id, kind, name, present))
                 tags = conn.execute("""
-                    SELECT kind, name FROM effective_book_tags WHERE book_id = ? ORDER BY kind, name
+                    SELECT kind, name FROM visible_book_tags WHERE book_id = ? ORDER BY kind, name
                 """, (book_id,)).fetchall()
         return jsonify([dict(tag) for tag in tags])
 
@@ -365,7 +494,7 @@ def main():
     parser.add_argument("--db", type=Path, default=BASE / "data" / "library.sqlite3")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--no-jm", action="store_true", help="跳过联网打标签")
+    parser.add_argument("--no-jm", action="store_true", help="跳过 JM 和 nHentai 标签查询")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")

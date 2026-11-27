@@ -3,5 +3,6 @@
   "images_dir": "books/images",
   "zip_dir": "books/zip",
   "jm_username": "",
-  "jm_password": ""
+  "jm_password": "",
+  "nhentai_api_key": ""
 }

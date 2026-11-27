@@ -3,6 +3,11 @@
 const byId = id => document.getElementById(id);
 const library = byId("library");
 const reader = byId("reader");
+const readerToolbar = byId("reader-toolbar");
+const showToolbarButton = byId("show-reader-toolbar");
+const compactReader = window.matchMedia("(max-width: 700px), (pointer: coarse)");
+const TOOLBAR_HIDE_DELAY = 4000;
+const TOOLBAR_TAP_HEIGHT = 48;
 const pages = byId("pages");
 const pageGuide = byId("page-guide");
 const reverseClick = byId("reverse-click");
@@ -42,6 +47,8 @@ let frame = null;
 let lastTime = null;
 let remainder = 0;
 let readingMode = "scroll";
+let toolbarTimer;
+let toolbarTapStart = null;
 let pageImages = [];
 let readingPage = 0;
 let pageTimer = null;
@@ -327,7 +334,50 @@ function showPageGuide() {
   pageGuideAnimation.onfinish = hidePageGuide;
 }
 
+function scheduleToolbarHide() {
+  clearTimeout(toolbarTimer);
+  if (!compactReader.matches || reader.hidden || readerToolbar.hidden) return;
+  toolbarTimer = setTimeout(() => {
+    if (readerToolbar.querySelector(":focus-visible")) return;
+    readerToolbar.hidden = true;
+    showToolbarButton.hidden = false;
+  }, TOOLBAR_HIDE_DELAY);
+}
+
+function showReaderToolbar() {
+  readerToolbar.hidden = false;
+  showToolbarButton.hidden = true;
+  scheduleToolbarHide();
+}
+
+for (const event of ["pointerdown", "pointerup", "input", "change", "focusout"]) {
+  readerToolbar.addEventListener(event, scheduleToolbarHide);
+}
+compactReader.addEventListener("change", () => {
+  if (!reader.hidden) showReaderToolbar();
+});
+showToolbarButton.addEventListener("click", () => {
+  showReaderToolbar();
+  byId("back").focus();
+});
+pages.addEventListener("pointerdown", event => {
+  toolbarTapStart = readerToolbar.hidden ? {x: event.clientX, y: event.clientY} : null;
+}, true);
+pages.addEventListener("click", event => {
+  const start = toolbarTapStart;
+  toolbarTapStart = null;
+  if (!readerToolbar.hidden || !start) return;
+  const top = pages.getBoundingClientRect().top;
+  const y = event.clientY - top;
+  if (y < 0 || y >= TOOLBAR_TAP_HEIGHT
+      || Math.hypot(event.clientX - start.x, event.clientY - start.y) > 12) return;
+  event.stopImmediatePropagation();
+  showReaderToolbar();
+}, true);
+
 function resetReader() {
+  clearTimeout(toolbarTimer);
+  toolbarTapStart = null;
   stopScroll();
   hidePageGuide();
   stopAutoPage();
@@ -355,6 +405,7 @@ async function route() {
   resetReader();
   library.hidden = true;
   reader.hidden = false;
+  showReaderToolbar();
   byId("reading-title").textContent = book.name;
   showMessage(pages, "正在打开书籍…");
   pages.scrollTop = 0;
@@ -624,6 +675,32 @@ async function refresh() {
     refreshTimer = setTimeout(refresh, 5000);
   }
 }
+const libraryRefreshButton = byId("library-refresh");
+const libraryRefreshStatus = byId("library-refresh-status");
+
+libraryRefreshButton.addEventListener("click", async () => {
+  libraryRefreshButton.disabled = true;
+  libraryRefreshStatus.hidden = false;
+  libraryRefreshStatus.textContent = "正在扫描书库…";
+  try {
+    const response = await fetch("/api/library/refresh", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: "{}",
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "刷新书库失败");
+    libraryRefreshStatus.textContent = result.queued
+      ? "书库已扫描。当前标签任务结束后会处理新书并重试失败项目。"
+      : "书库已扫描。";
+    await refresh();
+  } catch (error) {
+    libraryRefreshStatus.textContent = error.message;
+  } finally {
+    libraryRefreshButton.disabled = false;
+  }
+});
+
 for (const mode of ["list", "cover"]) {
   byId(mode + "-view").addEventListener("click", () => {
     viewMode = mode;
@@ -636,12 +713,194 @@ for (const mode of ["list", "cover"]) {
   });
 }
 
+const aliasesDialog = byId("tag-aliases");
+const aliasesForm = byId("aliases-form");
+const aliasKind = byId("alias-kind");
+const aliasSource = byId("alias-source");
+const aliasTarget = byId("alias-target");
+const aliasesStatus = byId("aliases-status");
+const aliasesExpand = byId("aliases-expand");
+const ALIAS_PREVIEW_COUNT = 5;
+let aliases = [];
+let aliasesExpanded = false;
+
+const aliasSuggestions = [
+  attachTagSuggestions(aliasSource, aliasKind, aliasesDialog, true),
+  attachTagSuggestions(aliasTarget, aliasKind, aliasesDialog, true),
+];
+
+function renderAliases() {
+  const remaining = aliases.length - ALIAS_PREVIEW_COUNT;
+  if (remaining <= 0) aliasesExpanded = false;
+  const visible = aliasesExpanded ? aliases : aliases.slice(0, ALIAS_PREVIEW_COUNT);
+  const entries = visible.map(alias => {
+    const item = document.createElement("li");
+    const label = document.createElement("span");
+    label.textContent = groups[alias.kind] + " · " + alias.alias + " 合并到 " + alias.target;
+    const undo = document.createElement("button");
+    undo.type = "button";
+    undo.textContent = "撤销";
+    undo.setAttribute("aria-label", "撤销合并 " + alias.alias);
+    undo.addEventListener("click", () => updateAliases("DELETE", alias));
+    item.append(label, undo);
+    return item;
+  });
+  byId("aliases-list").replaceChildren(...entries);
+  aliasesExpand.hidden = remaining <= 0;
+  aliasesExpand.textContent = aliasesExpanded ? "收起合并记录" : "展开其余 " + remaining + " 条";
+  aliasesExpand.setAttribute("aria-expanded", aliasesExpanded);
+}
+
+async function updateAliases(method, values) {
+  aliasSuggestions.forEach(suggestions => suggestions.clear());
+  aliasesStatus.textContent = "";
+  const buttons = [...aliasesDialog.querySelectorAll("form button, li button")];
+  buttons.forEach(button => { button.disabled = true; });
+  try {
+    const response = await fetch("/api/tag-aliases", {
+      method,
+      headers: values ? {"Content-Type": "application/json"} : {},
+      body: values ? JSON.stringify(values) : undefined,
+      cache: "no-store",
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "更新合并标签失败");
+    aliases = result;
+    if (method !== "GET") {
+      await refresh();
+      if (method === "POST") {
+        aliasSource.value = "";
+        aliasesStatus.textContent = "标签已合并";
+      } else {
+        aliasesStatus.textContent = "已撤销合并";
+      }
+    }
+    renderAliases();
+  } catch (error) {
+    aliasesStatus.textContent = error.message;
+  } finally {
+    buttons.forEach(button => { button.disabled = false; });
+  }
+}
+
+aliasesExpand.addEventListener("click", () => {
+  aliasesExpanded = !aliasesExpanded;
+  renderAliases();
+});
+byId("aliases-open").addEventListener("click", () => {
+  aliasesExpanded = false;
+  renderAliases();
+  aliasesDialog.showModal();
+  updateAliases("GET");
+});
+byId("aliases-close").addEventListener("click", () => aliasesDialog.close());
+aliasKind.addEventListener("change", () => {
+  aliasSource.value = "";
+  aliasTarget.value = "";
+  aliasSuggestions.forEach(suggestions => suggestions.clear());
+});
+aliasesForm.addEventListener("submit", event => {
+  event.preventDefault();
+  updateAliases("POST", {
+    kind: aliasKind.value,
+    alias: aliasSource.value.trim(),
+    target: aliasTarget.value.trim(),
+  });
+});
+
 const tagEditor = byId("tag-editor");
 const editableTags = byId("editable-tags");
 const tagForm = byId("tag-form");
 const tagName = byId("tag-name");
+const tagKind = byId("tag-kind");
+const tagSuggestions = attachTagSuggestions(tagName, tagKind, tagEditor);
 const tagStatus = byId("tag-status");
 let editingBookId = null;
+
+function attachTagSuggestions(input, category, dialog, merge = false) {
+  const list = byId(input.getAttribute("aria-controls"));
+  let timer;
+  let sequence = 0;
+  let active = -1;
+
+  function clear() {
+    clearTimeout(timer);
+    sequence++;
+    active = -1;
+    list.hidden = true;
+    list.replaceChildren();
+    input.setAttribute("aria-expanded", "false");
+    input.removeAttribute("aria-activedescendant");
+  }
+
+  function choose(name) {
+    input.value = name;
+    input.focus();
+    clear();
+  }
+
+  function suggest() {
+    clear();
+    const query = input.value.trim();
+    if (!query && !merge) return;
+
+    const requested = sequence;
+    const params = new URLSearchParams({kind: category.value, q: query});
+    if (merge) params.set("scope", "merge");
+    timer = setTimeout(async () => {
+      try {
+        const response = await fetch("/api/tags/suggestions?" + params, {cache: "no-store"});
+        if (!response.ok) return;
+        const matches = await response.json();
+        if (requested !== sequence || !dialog.open || !matches.length) return;
+
+        const options = matches.map((name, index) => {
+          const option = document.createElement("li");
+          option.id = list.id + "-" + index;
+          option.setAttribute("role", "option");
+          option.setAttribute("aria-selected", "false");
+          option.textContent = name;
+          option.addEventListener("pointerdown", event => event.preventDefault());
+          option.addEventListener("click", () => choose(name));
+          return option;
+        });
+        list.replaceChildren(...options);
+        list.hidden = false;
+        input.setAttribute("aria-expanded", "true");
+      } catch {
+        // Manual entry is still available if suggestions cannot be loaded.
+      }
+    }, 150);
+  }
+
+  input.addEventListener("input", suggest);
+  input.addEventListener("blur", clear);
+  dialog.addEventListener("close", clear);
+  if (merge) input.addEventListener("focus", suggest);
+  input.addEventListener("keydown", event => {
+    if (event.isComposing || list.hidden) return;
+    const options = [...list.children];
+    if (event.key === "Escape") {
+      event.preventDefault();
+      clear();
+    } else if (event.key === "Enter" && active >= 0) {
+      event.preventDefault();
+      choose(options[active].textContent);
+    } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      active = event.key === "ArrowDown"
+        ? (active + 1) % options.length
+        : active <= 0 ? options.length - 1 : active - 1;
+      options.forEach((option, index) => option.setAttribute("aria-selected", index === active));
+      const option = options[active];
+      input.setAttribute("aria-activedescendant", option.id);
+      option.scrollIntoView({block: "nearest"});
+    }
+  });
+  return {clear, suggest};
+}
+
+tagKind.addEventListener("change", tagSuggestions.suggest);
 
 function showEditableTags(tags) {
   editableTags.replaceChildren();
@@ -659,8 +918,12 @@ function showEditableTags(tags) {
 function openTagEditor(book) {
   editingBookId = book.id;
   tagForm.reset();
+  tagSuggestions.clear();
   tagStatus.textContent = "";
   byId("tag-book-name").textContent = book.name;
+  const source = byId("tag-book-source");
+  source.hidden = !book.tag_source;
+  source.textContent = book.tag_source === "nhentai" ? "自动标签来源 · nHentai" : "自动标签来源 · JM";
   showEditableTags(book.tags);
   tagEditor.showModal();
   tagName.focus();
@@ -697,7 +960,10 @@ byId("tag-editor-close").addEventListener("click", () => tagEditor.close());
 tagForm.addEventListener("submit", event => {
   event.preventDefault();
   const name = tagName.value.trim();
-  if (name) editTag({kind: byId("tag-kind").value, name}, true);
+  if (name) {
+    tagSuggestions.clear();
+    editTag({kind: tagKind.value, name}, true);
+  }
 });
 
 const settings = byId("settings");
@@ -727,6 +993,10 @@ function showSettings(config) {
   byId("jm-username").value = config.jm_username;
   byId("jm-password").value = "";
   byId("jm-password").placeholder = config.has_password ? "已保存，留空保留" : "";
+  byId("nhentai-api-key").value = "";
+  byId("nhentai-api-key").placeholder = config.has_nhentai_api_key ? "已保存，留空保留" : "";
+  byId("clear-nhentai-key-option").hidden = !config.has_nhentai_api_key;
+  byId("clear-nhentai-api-key").checked = false;
 }
 
 async function loadSettings() {
@@ -753,6 +1023,8 @@ byId("settings-open").addEventListener("click", () => {
 byId("settings-close").addEventListener("click", () => settings.close());
 settings.addEventListener("close", () => {
   byId("jm-password").value = "";
+  byId("nhentai-api-key").value = "";
+  byId("clear-nhentai-api-key").checked = false;
   byId("admin-password").value = "";
   adminPassword = "";
   settingsForm.hidden = true;
@@ -776,6 +1048,8 @@ settingsForm.addEventListener("submit", async event => {
       zip_dir: byId("zip-dir").value,
       jm_username: byId("jm-username").value,
       jm_password: byId("jm-password").value,
+      nhentai_api_key: byId("nhentai-api-key").value.trim(),
+      clear_nhentai_api_key: byId("clear-nhentai-api-key").checked,
       refresh: event.submitter?.value === "refresh",
     });
     if (!response.ok) {
@@ -851,6 +1125,7 @@ setupForm.addEventListener("submit", async event => {
         admin_password: admin,
         jm_username: username,
         jm_password: password,
+        nhentai_api_key: byId("setup-nhentai-api-key").value.trim(),
         pdf_dir: byId("setup-pdf-dir").value,
         images_dir: byId("setup-images-dir").value,
         zip_dir: byId("setup-zip-dir").value,
